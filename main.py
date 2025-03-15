@@ -24,8 +24,8 @@ def load_video_as_array(filename, crop_region=None):
     return np.stack(frames, axis=-1)  # Shape: (height, width, time)
 
 # ==== Configuration ====
-crop = False  # Set to False to keep the original size
-crop_region = (50, 150, 30, 130) if crop else None  # Define crop region if enabled
+crop = True  # Set to False to keep the original size
+crop_region = (0, 200, 00, 200) if crop else None  # Define crop region if enabled
 
 # def load_video_as_array(filename, crop_region):
 #     cap = cv2.VideoCapture(filename)
@@ -44,38 +44,65 @@ crop_region = (50, 150, 30, 130) if crop else None  # Define crop region if enab
     
 #     return np.stack(frames, axis=-1)  # Shape: (cropped_height, cropped_width, time)
 
-
-# Load cropped video
-
-def compute_fft(video_array):
-    return np.fft.fftshift(np.fft.fft(video_array, axis=-1), axes=-1)  # FFT over time dimension
-
-# Load video and compute FFT
-video_array = load_video_as_array("./capprobeBBS_90fps_750nmps.AVI", crop_region)
-fft_result = compute_fft(video_array)
-fft_conjugate = np.conj(fft_result)
-
-# Choose the (x, y) coordinate of interest
+# Choose the (x, y) coordinate to use as template chirp. Any clean pixel will work, this could be iteratively improved by aligning chirps using the final height map and averaging.
 x, y = 50, 50  # Adjust as needed
+
+# Load video
+video_array = load_video_as_array("./DTbrass_100fps_500nmps.AVI", crop_region)
+
+# gpu = True
+# # Select backend: NumPy for CPU, CuPy for GPU
+# xp = cp if use_gpu else np  
+
+# # Move to GPU
+# video_gpu = cp.array(video_array)
+# # Compute FFT on GPU
+# fft_gpu = cp.fft.fft(video_gpu, axis=-1)
+# # Compute IFT on GPU
+# ift_gpu = cp.fft.ifft(fft_gpu, axis=-1).real  # Extract real part
+# # Move result back to CPU
+# ift_result = np.fft.ifftshift(cp.asnumpy(ift_gpu)
+
+fft_result = np.fft.fftshift(np.fft.fft(video_array, axis=-1), axes=-1)  # FFT over time dimension
+t = video_array.shape[-1]  # Last dimension is time (frequency space)
+center_idx = t // 2  # Compute center index for DC component
+
+# Set DC component (center frequency) to zero along the last axis
+fft_result[..., center_idx] = 0
+
+
+fft_conjugate = np.conj(fft_result)
 
 # Extract the full frequency spectrum of the selected spatial point
 selected_spectrum = fft_result[x, y, :]  # Shape: (time,)
 
 products = selected_spectrum[None, None, :] * fft_conjugate
 ift_result = np.fft.ifftshift(np.fft.ifft(np.fft.ifftshift(products, axes=-1), axis=-1).real, axes=-1)  # Keep only real part
+# ift_result = np.fft.ifft(products, axis=-1).real  # Shape: (height, width, time)
 
 
 max_indices = np.argmax(ift_result, axis=-1)  # Shape: (height, width)
 
-# Open a new Matplotlib figure for displaying max indices
-fig_max, ax_max = plt.subplots()
-img_max = ax_max.imshow(max_indices, cmap="viridis")  # Display using a perceptually uniform colormap
-ax_max.set_title("Max Index per Pixel")
-plt.colorbar(img_max, ax=ax_max, label="Frame Index of Max Value")
+height, width = max_indices.shape
+# Generate x, y coordinate grid
+x = np.arange(width)
+y = np.arange(height)
+X, Y = np.meshgrid(x, y)
 
-plt.show()
+# Create a 3D figure
+fig = plt.figure(figsize=(10, 6))
+ax = fig.add_subplot(111, projection='3d')
 
-# ift_result = np.fft.ifft(products, axis=-1).real  # Shape: (height, width, time)
+# Plot surface (height map)
+ax.plot_surface(X, Y, max_indices, cmap="viridis", edgecolor="none")
+
+# Labels and title
+ax.set_xlabel("X Coordinate")
+ax.set_ylabel("Y Coordinate")
+ax.set_zlabel("Max Frame Index (Height)")
+ax.set_title("3D Height Map of Max Indices")
+
+
 
 print(fft_result.shape)  # Should be (height, width, time)
 
