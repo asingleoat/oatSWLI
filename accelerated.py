@@ -200,8 +200,8 @@ def process_chunks_fixed_size(array, process_func, chunk_h=128, chunk_w=128):
     we currently push one chunk at a time even if more than one would fit in VRAM, optimization TODO.
     """
     h, w, depth = array.shape
-    result_left = np.zeros((h, w))  # ✅ 2D placeholder
-    result_right = np.zeros((h, w, depth))  # ✅ 2D placeholder
+    result_left = np.zeros((h, w))
+    result_right = np.zeros((h, w, depth))
 
     for y_start in range(0, h, chunk_h):
         for x_start in range(0, w, chunk_w):
