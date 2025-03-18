@@ -9,4 +9,4 @@ otherwise you can inspect the dependencies in the shell.nix file and use your pr
 tested and developed on linux, testing on Macos is todo, and windows is a maybe as I don't have a windows machine
 
 # License
-this project is licensed under the terms of the GNU General Public License v3.0. See [LICENSE](./gpl-3.0.txt) for details. I'm happy to consider requests for more permissive licesning, find me on Twitter/X as asingleoat or email asingleoat on gmail.
+this project is licensed under the terms of the GNU General Public License v3.0. See [LICENSE](./gpl-3.0.txt) for details. I'm happy to consider requests for more permissive licensing, find me on Twitter/X as asingleoat or email asingleoat on gmail.

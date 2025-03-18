@@ -1,5 +1,5 @@
-# Use full color
-currently converting to greyscale but color has more information.
+# Use full colour
+currently converting to greyscale but colour has more information.
 trivial mechanical change: carry through three colour channels, perform three independent cross-correlations, vote for best fit (i.e. we take the max of the cross-correlation as position in the 1 channel case, probably take something like the max of the product of the three in the RGB case).
 
 # CPU multithreading
