@@ -16,5 +16,6 @@ we should allow loading a saved reference chirp from file
 we should produce reference chirps by iterative optimization: select an arbitrary chirp, compute cross-correlations on some sample, align sequences, average aligned sequences, use as new chirp, repeat until convergence
 
 # Meaningful units
-currently working in native pixels and frames with no connection to physical units
+currently working in native pixels and frames with no connection to physical units.
+
 image export rescales data to [0,1*2^{bit_depth}], should at least report what the scaling was so that external tools can properly interpret the data
