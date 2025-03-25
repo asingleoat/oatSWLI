@@ -9,7 +9,13 @@
   outputs = { self, nixpkgs, flake-utils, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        pkgs = nixpkgs.legacyPackages.${system};
+        # Configure nixpkgs to allow unfree packages
+        pkgs = import nixpkgs {
+          inherit system;
+          config = {
+            allowUnfree = true;
+          };
+        };
       in
       {
         devShells.default = pkgs.mkShell {
@@ -31,7 +37,8 @@
           ];
 
           shellHook = ''
-            echo "python environment with CUDA."
+            echo "Python environment with CUDA support activated."
+            echo "Note: This environment includes non-free software (CUDA, torch-bin)."
           '';
         };
       }
