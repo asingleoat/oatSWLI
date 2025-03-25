@@ -1,1 +1,7 @@
 .direnv/
+data/
+
+# TODO: output should be in data/out/
+out.png
+
+.mypy_cache/

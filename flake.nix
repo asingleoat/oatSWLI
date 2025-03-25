@@ -24,6 +24,7 @@
             python311
             freetype
             glfw
+            gnumake
             (python311Packages.python.withPackages (ps: with ps; [
               numpy
               opencv4
@@ -32,6 +33,7 @@
               torch-bin
               scipy
               plotly
+              gdown
             ]))
             cudatoolkit  # Ensures CUDA libraries are available
           ];
