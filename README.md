@@ -7,7 +7,7 @@ otherwise you can inspect the dependencies in the shell.nix file and use your pr
 
 ❯ python3 accelerated.py ringgage_100fps_500nmps.AVI --gpu
 
-![image](./demo.webp)
+![demo output](demo.webp)
 
 tested and developed on linux, testing on Macos is todo, and windows is a maybe as I don't have a windows machine
 
