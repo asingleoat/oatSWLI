@@ -74,6 +74,8 @@ def gaussian_smooth_time(x: torch.Tensor, sigma: float, truncate: float = 4.0) -
 # print("CUDA device name:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "No GPU detected")
 # print("PyTorch built with CUDA:", torch.backends.cuda.is_built())
 
+frame_factor = 10
+
 def load_video(filename, crop_region=None, rgb=True):
     cap = cv2.VideoCapture(filename)
     frames = []
@@ -96,7 +98,7 @@ def load_video(filename, crop_region=None, rgb=True):
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             frame = frame[:, :, np.newaxis]
 
-        if cut and (i % 2 != 0):
+        if cut and (i % frame_factor != 0):
             i += 1
             continue
         else:
@@ -198,7 +200,7 @@ def quadratic_subpixel_peak_3d_torch(array):
     h, w, c, t = array.shape
     device = array.device
 
-    smoothed = gaussian_smooth_time(array, 15/2)
+    smoothed = gaussian_smooth_time(array, 20/frame_factor)
     
     # flat = array.view(-1, t)  # (h*w*c, t)
     flat = smoothed.view(-1, t)  # (h*w*c, t)
@@ -341,7 +343,7 @@ if __name__ == "__main__":
 
     crop = False
     # crop = True
-    crop_region = (0, 200, 0, 200) if crop else None
+    crop_region = (0, 600, 0, 600) if crop else None
 
     video_array = load_video(args.video_file, crop_region, rgb=True)
     print(video_array.shape)
@@ -362,8 +364,10 @@ if __name__ == "__main__":
     # max_indices = np.clip(max_indices, a_min=-50, a_max=50)
 
     # take the average of the three color channel heightmaps. there are smarter ways to combine...
-    max_indices = max_indices.mean(axis=2)
-
+    print(max_indices.shape)
+    max_indices = max_indices[:,:,1:].mean(axis=2)
+    print(max_indices.shape)
+    
     np.save('array.npy', max_indices)    
     normalize_and_save(max_indices, "out.png")
 
@@ -398,8 +402,11 @@ if __name__ == "__main__":
         ax_sequence.set_ylabel("Intensity")
 
         reference_curve = torch.abs(torch.fft.ifft(reference_chirp, axis=-1)).cpu()
-        reference_plot, = ax_sequence.plot(np.arange(reference_curve.shape[0]), reference_curve, label="Reference Curve", linestyle="dashed", color="red",)
-        sequence_plot, = ax_sequence.plot([], [], label="Selected Pixel", color="blue")
+        print(reference_curve.shape)
+        reference_plot, = ax_sequence.plot(np.arange(reference_curve.shape[1]), reference_curve[0], label="Reference Curve", linestyle="dashed", color="black",)
+        sequence_plot_r, = ax_sequence.plot([], [], label="Selected Pixel_r", color="red")
+        sequence_plot_g, = ax_sequence.plot([], [], label="Selected Pixel_g", color="green")
+        sequence_plot_b, = ax_sequence.plot([], [], label="Selected Pixel_b", color="blue")
 
         # click on a point in the 2d image to view the cross-correlation curve for that point and the reference chirp
         def on_click(event):
@@ -412,8 +419,12 @@ if __name__ == "__main__":
             sequence = ift_result[x, y, :].real / 1000
 
             # Update plots
-            sequence_plot.set_xdata(np.arange(sequence.shape[0]))
-            sequence_plot.set_ydata(sequence)
+            sequence_plot_r.set_xdata(np.arange(sequence.shape[1]))
+            sequence_plot_r.set_ydata(sequence[2])
+            sequence_plot_g.set_xdata(np.arange(sequence.shape[1]))
+            sequence_plot_g.set_ydata(sequence[1])
+            sequence_plot_b.set_xdata(np.arange(sequence.shape[1]))
+            sequence_plot_b.set_ydata(sequence[0])
             
             ax_sequence.relim()
             ax_sequence.autoscale_view()
