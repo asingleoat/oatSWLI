@@ -32,16 +32,12 @@ def gaussian_smooth_time(array, sigma, truncate=4.0):
     kernel1d = kernel.view(1, 1, kernel_size)
 
     h, w, c, t = array.shape
-    flat = array.view(-1, 1, t)  # shape: (H*W*C, 1, T)
+    flat = array.view(-1, 1, t)  # shape: (h*w*c, 1, t)
 
-    # Pad the time dimension to preserve output length T
-    # (Using reflection padding to avoid border effects)
     padded = F.pad(flat, (radius, radius), mode='reflect')
 
-    # Convolve along the time axis with the Gaussian kernel (depthwise convolution)
     smoothed_flat = F.conv1d(padded, kernel1d)
 
-    # Reshape back to original dimensions (H, W, C, T)
     smoothed = smoothed_flat.view(h, w, c, t)
     return smoothed
 
