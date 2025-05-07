@@ -4,6 +4,8 @@
 pkgs.mkShell {
   nativeBuildInputs = with pkgs; [ pkg-config ];  
   buildInputs = with pkgs; [
+    ruff
+    black
     python312
     freetype
     glfw
