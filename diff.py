@@ -2,8 +2,8 @@
 
 import numpy as np
 
-a = np.load('fullframes.npy')
-b = np.load('cutframes.npy')
+a = np.load("fullframes.npy")
+b = np.load("cutframes.npy")
 frame_cut_factor = 10
 b = b * frame_cut_factor
 
