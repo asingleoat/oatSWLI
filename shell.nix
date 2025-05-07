@@ -4,10 +4,10 @@
 pkgs.mkShell {
   nativeBuildInputs = with pkgs; [ pkg-config ];  
   buildInputs = with pkgs; [
-    python311
+    python312
     freetype
     glfw
-    (python311Packages.python.withPackages (ps: with ps; [
+    (python312Packages.python.withPackages (ps: with ps; [
       numpy
       opencv4
       ffmpeg
