@@ -44,7 +44,9 @@ def main():
     args = parser.parse_args()
 
     # Load and prepare video
-    crop_region = (0, 200, 0, 200) if False else None
+    # crop = False
+    crop = True
+    crop_region = (0, 200, 0, 200) if crop else None
     video_array_BGR = load_video(
         args.video_file, crop_region, rgb=True, frame_factor=frame_factor
     )

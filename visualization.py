@@ -22,7 +22,7 @@ def create_3d_surface_plot(heightmap, title="Heightmap"):
         title=dict(text=title),
         autosize=True,
         margin=dict(l=65, r=50, b=65, t=90),
-        scene={"aspectratio": {"x": 1, "y": 1, "z": 2}},
+        scene={"aspectratio": {"x": 1, "y": 1, "z": 0.2}},
     )
     return fig
 
