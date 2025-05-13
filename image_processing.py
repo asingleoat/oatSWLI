@@ -11,12 +11,18 @@ def get_video_metadata(filename):
     ret, frame = cap.read()
     channels = frame.shape[2] if ret else 0
 
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    c = channels
+    t = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
     metadata = {
-        "width": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-        "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-        "total_frames": int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
+        "shape": (w, h, c, t),
+        "width": w,
+        "height": h,
+        "total_frames": t,
         "fps": cap.get(cv2.CAP_PROP_FPS),
-        "channels": channels,
+        "channels": c,
     }
 
     cap.release()

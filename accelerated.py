@@ -21,6 +21,7 @@ from image_processing import (
     normalize_and_save,
     remove_tilt_grayscale,
     smooth_outliers,
+    get_video_metadata,
 )
 from visualization import create_3d_surface_plot, setup_interactive_plots
 
@@ -43,26 +44,55 @@ def main():
     )
     args = parser.parse_args()
 
-    # Load and prepare video
-    # crop = False
-    crop = True
+    metadata = get_video_metadata(args.video_file)
+    print(metadata)
+    shape = metadata["shape"]
+
+    if shape[2] == 3:
+        shape = shape[0], shape[1], 2, shape[3]
+        # drop blue, TODO, deal with noisy blue in a more principled manner
+
+    crop = False
+    # crop = True
     crop_region = (0, 200, 0, 200) if crop else None
-    video_array_BGR = load_video(
-        args.video_file, crop_region, rgb=True, frame_factor=frame_factor
-    )
-    video_array = video_array_BGR[:, :, 1:, :]  # drop blue channel
-    print(f"Video shape: {video_array.shape}")
 
     # Create reference chirp
-    h, w, c, t = video_array.shape
-    x, y = h // 2, w // 2  # point to extract reference chirp from
-    reference_chirp = make_reference_avg(video_array, x, y, window=50, use_gpu=args.gpu)
+    h, w, c, t = shape
+    # point to extract reference chirp from
+    x, y = (
+        ((crop_region[0] + crop_region[1]) // 2, (crop_region[2] + crop_region[3]) // 2)
+        if crop_region
+        else (h // 2, w // 2)
+    )
+    chirp_window = 50  # tweak me, see TODO, not currently centered :O
+    print(x, y, "check")
+    video_array_chirp = load_video(
+        args.video_file,
+        (x, x + chirp_window, y, y + chirp_window),
+        rgb=True,
+        frame_factor=frame_factor,
+    )
+    video_array_chirp = video_array_chirp[:, :, 1:, :]  # drop blue channel
+
+    reference_chirp = make_reference_avg(
+        video_array_chirp, window=chirp_window, use_gpu=args.gpu
+    )
 
     # Process video in chunks
     chunk_h = chunk_w = args.chunk_size
     (max_indices, ift_result) = process_chunks_fixed_size(
-        video_array,
+        shape,
         lambda v: cross_correlate(reference_chirp, v, use_gpu=args.gpu),
+        lambda x_start, x_end, y_start, y_end: (
+            load_video(
+                args.video_file,
+                (x_start, x_end, y_start, y_end),
+                rgb=True,
+                frame_factor=frame_factor,
+            )
+        )[
+            :, :, 1:, :
+        ],  # drop blue channel
         chunk_h=chunk_h,
         chunk_w=chunk_w,
     )

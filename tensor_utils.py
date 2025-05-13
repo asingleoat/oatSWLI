@@ -123,7 +123,7 @@ def make_reference(video_array, x, y, use_gpu=True):
     return fft_result
 
 
-def make_reference_avg(video_array, x, y, window=50, use_gpu=True):
+def make_reference_avg(video_array, window=50, use_gpu=True):
     """Create reference chirp by averaging over a window of points."""
     device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
     h, w, c, t = video_array.shape
@@ -133,7 +133,7 @@ def make_reference_avg(video_array, x, y, window=50, use_gpu=True):
             for j in range(window):
                 for channel in range(c):
                     video_torch = torch.tensor(
-                        video_array[x + i, y + j, channel, :],
+                        video_array[i, j, channel, :],
                         device=device,
                         dtype=torch.complex64,
                     )
@@ -148,14 +148,25 @@ def make_reference_avg(video_array, x, y, window=50, use_gpu=True):
     return result
 
 
-def process_chunks_fixed_size(array, process_func, chunk_h=128, chunk_w=128):
+def process_chunks_fixed_size(
+    shape, process_func, get_chunk_data, chunk_h=128, chunk_w=128
+):
     """
     Process array in chunks to reduce memory usage.
 
     This allows processing large arrays that wouldn't fit in GPU memory all at once.
     Each pixel alignment can be computed independently (embarrassingly parallel).
+    Args:
+        shape: Full array dimensions (h, w, color, depth)
+        process_func: Function to process each chunk
+        get_chunk_data: Function to retrieve chunk data given chunk coordinates
+        chunk_h: Height of processing chunks
+        chunk_w: Width of processing chunks
+
+    Returns:
+        Processed results covering entire shape
     """
-    h, w, color, depth = array.shape
+    h, w, color, depth = shape
     result_left = np.zeros((h, w))
     result_right = np.zeros((h, w, color, depth))
 
@@ -164,7 +175,10 @@ def process_chunks_fixed_size(array, process_func, chunk_h=128, chunk_w=128):
             y_end = min(y_start + chunk_h, h)
             x_end = min(x_start + chunk_w, w)
 
-            chunk = array[y_start:y_end, x_start:x_end, :, :]
+            # Retrieve chunk data using get_chunk_data
+            chunk = get_chunk_data(x_start, x_end, y_start, y_end)
+
+            # Process chunk using original process_func
             (processed_chunk_left, processed_chunk_right) = process_func(chunk)
 
             result_left[y_start:y_end, x_start:x_end] = processed_chunk_left
