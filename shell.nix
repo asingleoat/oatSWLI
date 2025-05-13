@@ -23,5 +23,6 @@ pkgs.mkShell {
 
   shellHook = ''
     echo "python environment with CUDA."
+    export TMPDIR=/tmp # so that things like `eval (ssh-agent -c)` will work in the nix-shell
   '';
 }
