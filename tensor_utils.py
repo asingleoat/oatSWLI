@@ -5,6 +5,13 @@ import torch.nn.functional as F
 import numpy as np
 
 
+def get_available_vram(device=0):
+    torch.cuda.empty_cache()
+    reserved = torch.cuda.memory_reserved(device)
+    total = torch.cuda.get_device_properties(device).total_memory
+    return total - reserved
+
+
 def gaussian_smooth_time(array, sigma, truncate=4.0):
     radius = int(truncate * sigma + 0.5)
     if radius <= 0:
@@ -40,7 +47,7 @@ def cross_correlate(reference_chirp, video_array, use_gpu=True):
         device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
 
         video_torch = torch.tensor(video_array, device=device, dtype=torch.complex64)
-        print(f"Tensor is on device: {video_torch.device}")
+        # print(f"Tensor is on device: {video_torch.device}")
 
         fft_result = torch.fft.fftshift(torch.fft.fft(video_torch, dim=-1), dim=-1)
 
@@ -170,11 +177,14 @@ def process_chunks_fixed_size(
     result_left = np.zeros((h, w))
     result_right = np.zeros((h, w, color, depth))
 
+    chunk_counter = 0
     for y_start in range(0, h, chunk_h):
         for x_start in range(0, w, chunk_w):
             y_end = min(y_start + chunk_h, h)
             x_end = min(x_start + chunk_w, w)
 
+            chunk_counter += 1
+            print(f"Processing chunk: {chunk_counter}")
             # Retrieve chunk data using get_chunk_data
             chunk = get_chunk_data(x_start, x_end, y_start, y_end)
 

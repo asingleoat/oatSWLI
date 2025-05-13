@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import asyncio
 import sys
 import argparse
 import numpy as np
@@ -15,6 +16,7 @@ from tensor_utils import (
     fps,
     frame_factor,
     nmps,
+    get_available_vram,
 )
 from image_processing import (
     load_video,
@@ -40,6 +42,9 @@ def main():
         "--plot2d", action="store_true", help="Show interactive 2D plots"
     )
     parser.add_argument(
+        "--plot3d", action="store_true", help="Show interactive 3D plots"
+    )
+    parser.add_argument(
         "--chunk-size", type=int, default=32, help="Chunk size for processing"
     )
     args = parser.parse_args()
@@ -48,13 +53,16 @@ def main():
     print(metadata)
     shape = metadata["shape"]
 
+    if args.gpu:
+        print(get_available_vram('cuda'))
+
     if shape[2] == 3:
         shape = shape[0], shape[1], 2, shape[3]
         # drop blue, TODO, deal with noisy blue in a more principled manner
 
-    crop = False
-    # crop = True
-    crop_region = (0, 200, 0, 200) if crop else None
+    # crop = False
+    crop = True
+    crop_region = (0, 128, 0, 128) if crop else None
 
     # Create reference chirp
     h, w, c, t = shape
@@ -80,8 +88,12 @@ def main():
 
     # Process video in chunks
     chunk_h = chunk_w = args.chunk_size
+
+    # this is ugly, refactor later
+    processing_shape = (crop_region[1], crop_region[3], c, t) if crop else shape
+
     (max_indices, ift_result) = process_chunks_fixed_size(
-        shape,
+        processing_shape,
         lambda v: cross_correlate(reference_chirp, v, use_gpu=args.gpu),
         lambda x_start, x_end, y_start, y_end: (
             load_video(
@@ -113,8 +125,9 @@ def main():
     print(f"Execution time: {end_time - start_time:.6f} seconds")
 
     # Create and display 3D visualization
-    fig = create_3d_surface_plot(max_indices)
-    fig.show()
+    if args.plot3d:
+        fig = create_3d_surface_plot(max_indices)
+        fig.show()
 
     # Optionally show interactive 2D plots
     if args.plot2d:
