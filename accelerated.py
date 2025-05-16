@@ -17,6 +17,8 @@ from tensor_utils import (
     frame_factor,
     nmps,
     get_available_vram,
+    gpu_worker,
+    estimate_chunk_vram_usage,
 )
 from image_processing import (
     load_video,
@@ -53,27 +55,46 @@ def main():
     print(metadata)
     shape = metadata["shape"]
 
-    if args.gpu:
-        print(get_available_vram('cuda'))
-
     if shape[2] == 3:
-        shape = shape[0], shape[1], 2, shape[3]
         # drop blue, TODO, deal with noisy blue in a more principled manner
+        shape = shape[0], shape[1], 2, shape[3]
 
+    h, w, c, t = shape
     # crop = False
     crop = True
-    crop_region = (0, 128, 0, 128) if crop else None
+    # TODO: take in crop params from the CLI
+    # may be the whole field, the trivial crop
+    crop_region = (0, 128, 0, 128) if crop else (0, h, 0, w)
+    shape = (crop_region[1], crop_region[3], c, t)
+    chunk_h = chunk_w = args.chunk_size
+
+    if args.gpu:
+
+        available_vram = get_available_vram()
+        chunk_bytes = estimate_chunk_vram_usage((chunk_h, chunk_w, c, t))
+        max_concurrent = max(1, available_vram // chunk_bytes)
+        chunks_to_process = ((h + chunk_h - 1) // chunk_h) * (
+            (w + chunk_w - 1) // chunk_w
+        )
+        print(available_vram, chunk_bytes, max_concurrent, chunks_to_process)
+        # semaphore = asyncio.Semaphore(max_concurrent)
+        # output_queue = asyncio.Queue()
+
+    # tasks = []
+    # for i in range(20):  # 20 total chunks
+    #     chunk = await load_chunk(i)
+    #     task = asyncio.create_task(gpu_worker(chunk, semaphore, output_queue))
+    #     tasks.append(task)
+
+    # await asyncio.gather(*tasks)
 
     # Create reference chirp
-    h, w, c, t = shape
     # point to extract reference chirp from
-    x, y = (
-        ((crop_region[0] + crop_region[1]) // 2, (crop_region[2] + crop_region[3]) // 2)
-        if crop_region
-        else (h // 2, w // 2)
-    )
-    chirp_window = 50  # tweak me, see TODO, not currently centered :O
-    print(x, y, "check")
+    x, y = (crop_region[0] + crop_region[1]) // 2, (
+        crop_region[2] + crop_region[3]
+    ) // 2
+
+    chirp_window = 50  # see TODO, not currently centered :O
     video_array_chirp = load_video(
         args.video_file,
         (x, x + chirp_window, y, y + chirp_window),
@@ -87,13 +108,8 @@ def main():
     )
 
     # Process video in chunks
-    chunk_h = chunk_w = args.chunk_size
-
-    # this is ugly, refactor later
-    processing_shape = (crop_region[1], crop_region[3], c, t) if crop else shape
-
     (max_indices, ift_result) = process_chunks_fixed_size(
-        processing_shape,
+        shape,
         lambda v: cross_correlate(reference_chirp, v, use_gpu=args.gpu),
         lambda x_start, x_end, y_start, y_end: (
             load_video(

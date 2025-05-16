@@ -1,8 +1,38 @@
 #!/usr/bin/env python3
 
+import asyncio
 import torch
 import torch.nn.functional as F
 import numpy as np
+import math
+
+# async def gpu_worker(chunk, semaphore, output_queue):
+#     async with semaphore:
+#         result = await process_on_gpu(chunk)
+#         await output_queue.put(result)
+
+
+async def gpu_worker(input_queue, output_queue, semaphore):
+    while True:
+        chunk = await input_queue.get()
+        if chunk is None:
+            input_queue.task_done()
+            break
+
+        async with semaphore:
+            try:
+                result = await process_on_gpu(chunk)
+                await output_queue.put(result)
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower():
+                    print("OOM — requeuing chunk")
+                    await input_queue.put(chunk)
+                    torch.cuda.empty_cache()
+                    await asyncio.sleep(0.1)  # backoff
+                else:
+                    raise  # propagate other errors
+
+        input_queue.task_done()
 
 
 def get_available_vram(device=0):
@@ -10,6 +40,10 @@ def get_available_vram(device=0):
     reserved = torch.cuda.memory_reserved(device)
     total = torch.cuda.get_device_properties(device).total_memory
     return total - reserved
+
+
+def estimate_chunk_vram_usage(chunk_shape, dtype=torch.float64):
+    return math.prod(chunk_shape) * dtype.itemsize
 
 
 def gaussian_smooth_time(array, sigma, truncate=4.0):
