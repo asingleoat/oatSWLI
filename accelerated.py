@@ -6,6 +6,7 @@ import argparse
 import numpy as np
 import time
 import torch
+import os
 
 # Import our refactored modules
 from tensor_utils import (
@@ -30,7 +31,7 @@ from image_processing import (
 from visualization import create_3d_surface_plot, setup_interactive_plots
 
 
-def main():
+async def main():
     start_time = time.perf_counter()
 
     parser = argparse.ArgumentParser(
@@ -47,7 +48,7 @@ def main():
         "--plot3d", action="store_true", help="Show interactive 3D plots"
     )
     parser.add_argument(
-        "--chunk-size", type=int, default=32, help="Chunk size for processing"
+        "--chunk-size", type=int, default=128, help="Chunk size for processing"
     )
     args = parser.parse_args()
 
@@ -60,8 +61,8 @@ def main():
         shape = shape[0], shape[1], 2, shape[3]
 
     h, w, c, t = shape
-    # crop = False
-    crop = True
+    crop = False
+    # crop = True
     # TODO: take in crop params from the CLI
     # may be the whole field, the trivial crop
     crop_region = (0, 128, 0, 128) if crop else (0, h, 0, w)
@@ -108,22 +109,42 @@ def main():
     )
 
     # Process video in chunks
-    (max_indices, ift_result) = process_chunks_fixed_size(
+    if args.gpu:
+        max_concurrent = 4  # max(1, available_vram // chunk_bytes)
+    else:
+        max_concurrent = 4  # Default for CPU processing
+
+    def cross_correlate_chunk(v):
+        return cross_correlate(reference_chirp, v, use_gpu=args.gpu)
+
+    result_queue = await process_chunks_fixed_size(
         shape,
-        lambda v: cross_correlate(reference_chirp, v, use_gpu=args.gpu),
-        lambda x_start, x_end, y_start, y_end: (
-            load_video(
-                args.video_file,
-                (x_start, x_end, y_start, y_end),
-                rgb=True,
-                frame_factor=frame_factor,
-            )
-        )[
-            :, :, 1:, :
-        ],  # drop blue channel
+        reference_chirp,
+        args.video_file,
         chunk_h=chunk_h,
         chunk_w=chunk_w,
+        max_concurrent=max_concurrent,
+        max_workers=max_concurrent,  # Use all available CPU cores
     )
+
+    # Reassemble results
+    max_indices = np.zeros((shape[0], shape[1]))
+    ift_result = np.zeros((shape[0], shape[1], shape[2], shape[3]))
+
+    while True:
+        chunk = await result_queue.get()
+        if chunk is None:
+            break
+
+        max_indices[
+            chunk["y_start"] : chunk["y_end"], chunk["x_start"] : chunk["x_end"]
+        ] = chunk["result_left"]
+
+        ift_result[
+            chunk["y_start"] : chunk["y_end"], chunk["x_start"] : chunk["x_end"], :, :
+        ] = chunk["result_right"]
+
+        result_queue.task_done()
 
     # Post-process height map
     max_indices = remove_tilt_grayscale(max_indices)
@@ -154,4 +175,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

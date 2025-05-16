@@ -5,7 +5,11 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import math
-
+import os
+import concurrent.futures
+from image_processing import (
+    load_video,
+    )
 # async def gpu_worker(chunk, semaphore, output_queue):
 #     async with semaphore:
 #         result = await process_on_gpu(chunk)
@@ -189,46 +193,89 @@ def make_reference_avg(video_array, window=50, use_gpu=True):
     return result
 
 
-def process_chunks_fixed_size(
-    shape, process_func, get_chunk_data, chunk_h=128, chunk_w=128
+async def process_chunks_fixed_size(
+    shape,
+    reference_chirp,
+    filename,
+    chunk_h=128,
+    chunk_w=128,
+    max_concurrent=4,
+    max_workers=4,
+    use_gpu=True,
 ):
     """
-    Process array in chunks to reduce memory usage.
+    Asynchronously process array in chunks with bounded parallelism.
 
-    This allows processing large arrays that wouldn't fit in GPU memory all at once.
-    Each pixel alignment can be computed independently (embarrassingly parallel).
     Args:
         shape: Full array dimensions (h, w, color, depth)
         process_func: Function to process each chunk
         get_chunk_data: Function to retrieve chunk data given chunk coordinates
         chunk_h: Height of processing chunks
         chunk_w: Width of processing chunks
+        max_concurrent: Maximum number of concurrent chunk processing tasks
+        max_workers: Maximum number of CPU workers for chunk loading
 
     Returns:
-        Processed results covering entire shape
+        asyncio.Queue containing chunk results with positional metadata
     """
     h, w, color, depth = shape
-    result_left = np.zeros((h, w))
-    result_right = np.zeros((h, w, color, depth))
+    result_queue = asyncio.Queue()
+    semaphore = asyncio.Semaphore(max_concurrent)
 
-    chunk_counter = 0
-    for y_start in range(0, h, chunk_h):
-        for x_start in range(0, w, chunk_w):
-            y_end = min(y_start + chunk_h, h)
-            x_end = min(x_start + chunk_w, w)
+    # Use all available CPU cores if not specified
+    if max_workers is None:
+        max_workers = os.cpu_count()
 
-            chunk_counter += 1
-            print(f"Processing chunk: {chunk_counter}")
-            # Retrieve chunk data using get_chunk_data
-            chunk = get_chunk_data(x_start, x_end, y_start, y_end)
+    # Create ProcessPoolExecutor outside of a context manager
+    executor = concurrent.futures.ProcessPoolExecutor(max_workers=max_workers)
 
-            # Process chunk using original process_func
-            (processed_chunk_left, processed_chunk_right) = process_func(chunk)
+    try:
+        async def process_chunk(x_start, x_end, y_start, y_end):
+            async with semaphore:
+                print(f"Running chunk: {x_start, x_end, y_start, y_end}")
+                # Parallelize chunk data loading
+                chunk_future = executor.submit(load_video, filename, (x_start, x_end, y_start, y_end))
+                chunk = await asyncio.wrap_future(chunk_future)
 
-            result_left[y_start:y_end, x_start:x_end] = processed_chunk_left
-            result_right[y_start:y_end, x_start:x_end, :, :] = processed_chunk_right
+                # Process the chunk
+                processed_result = cross_correlate(reference_chirp, chunk[:, :, 1:, :], use_gpu)  # drop blue channel
 
-    return (result_left, result_right)
+                await result_queue.put(
+                    {
+                        "x_start": x_start,
+                        "x_end": x_end,
+                        "y_start": y_start,
+                        "y_end": y_end,
+                        "result_left": processed_result[0],
+                        "result_right": processed_result[1],
+                    }
+                )
+
+        # Create tasks for all chunks
+        tasks = []
+        chunk_counter = 0
+        for y_start in range(0, h, chunk_h):
+            for x_start in range(0, w, chunk_w):
+                y_end = min(y_start + chunk_h, h)
+                x_end = min(x_start + chunk_w, w)
+
+                chunk_counter += 1
+                print(f"Queuing chunk: {chunk_counter}")
+
+                task = asyncio.create_task(process_chunk(x_start, x_end, y_start, y_end))
+                tasks.append(task)
+
+        # Wait for all chunks to be processed
+        await asyncio.gather(*tasks)
+
+        # Signal end of processing
+        await result_queue.put(None)
+
+    finally:
+        # Ensure executor is shut down properly
+        executor.shutdown(wait=True)
+
+    return result_queue
 
 
 # Global parameters used by functions
