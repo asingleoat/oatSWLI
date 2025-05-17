@@ -57,9 +57,9 @@ async def main():
     print(metadata)
     shape = metadata["shape"]
 
-    if shape[2] == 3:
+    # if shape[2] == 3:
         # drop blue, TODO, deal with noisy blue in a more principled manner
-        shape = shape[0], shape[1], 2, shape[3]
+        # shape = shape[0], shape[1], 2, shape[3]
 
     h, w, c, t = shape
     # crop = False
@@ -101,7 +101,7 @@ async def main():
         rgb=True,
         frame_factor=frame_factor,
     )
-    video_array_chirp = video_array_chirp[:, :, 1:, :]  # drop blue channel
+    # video_array_chirp = video_array_chirp[:, :, 1:, :]  # drop blue channel
 
     reference_chirp = make_reference_avg(
         video_array_chirp, window=chirp_window, use_gpu=args.gpu
@@ -122,11 +122,13 @@ async def main():
         max_concurrent=max_concurrent,
         max_workers=max_concurrent,  # Use all available CPU cores
         use_gpu=args.gpu,
+        raw_data=args.plot2d
     )
 
     # Reassemble results
     max_indices = np.zeros((shape[0], shape[1]))
-    ift_result = np.zeros((shape[0], shape[1], shape[2], shape[3]))
+    if args.plot2d:    
+        ift_result = np.zeros((shape[0], shape[1], shape[2], shape[3]))
 
     while True:
         chunk = await result_queue.get()
@@ -137,9 +139,10 @@ async def main():
             chunk["y_start"] : chunk["y_end"], chunk["x_start"] : chunk["x_end"]
         ] = chunk["result_left"]
 
-        ift_result[
-            chunk["y_start"] : chunk["y_end"], chunk["x_start"] : chunk["x_end"], :, :
-        ] = chunk["result_right"]
+        if args.plot2d:
+            ift_result[
+                chunk["y_start"] : chunk["y_end"], chunk["x_start"] : chunk["x_end"], :, :
+            ] = chunk["result_right"]
 
         result_queue.task_done()
 

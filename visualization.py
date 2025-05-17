@@ -92,7 +92,9 @@ def setup_interactive_plots(metadata, ift_result, reference_chirp, crop_region):
         x, y = int(event.ydata), int(event.xdata)
 
         sequence = ift_result[x, y, :].real / 1000
-
+        cubed_0 = np.power(sequence[0],3)
+        cubed_1 = np.power(sequence[1],3)
+        cubed_2 = np.power(sequence[2],3)
         # Update plots
         sequence_plot_r.set_xdata(np.arange(sequence.shape[1]))
         sequence_plot_r.set_ydata(normalize_max_abs(sequence[-1]))
@@ -103,8 +105,9 @@ def setup_interactive_plots(metadata, ift_result, reference_chirp, crop_region):
         sequence_plot_p.set_xdata(np.arange(sequence.shape[1]))
         sequence_plot_p.set_ydata(
             normalize_max_abs(clip_negative(sequence[0])) * normalize_max_abs(clip_negative(sequence[-1])))
-        sequence_plot_cube.set_ydata(
-            normalize_max_abs(sequence[0]**3 + sequence[-1]**3))
+        sequence_plot_cube.set_xdata(np.arange(sequence.shape[1]))            
+        sequence_plot_cube.set_ydata(2*
+            normalize_max_abs(cubed_0 + cubed_1 + cubed_2))
 
         ax_sequence.relim()
         ax_sequence.autoscale_view()

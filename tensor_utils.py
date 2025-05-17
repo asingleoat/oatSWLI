@@ -74,7 +74,7 @@ def gaussian_smooth_time(array, sigma, truncate=4.0):
     return smoothed
 
 
-def cross_correlate(reference_chirp, video_array, use_gpu=True):
+def cross_correlate(reference_chirp, video_array, use_gpu=True, raw_data=True):
     """
     Cross-correlate reference chirp with video array using FFT.
 
@@ -104,10 +104,16 @@ def cross_correlate(reference_chirp, video_array, use_gpu=True):
         # Find subpixel peaks for precise alignment
         max_indices = quadratic_subpixel_peak(ift_result)
 
-        return (
-            max_indices.cpu().numpy() if use_gpu else max_indices.numpy(),
-            ift_result.cpu().numpy() if use_gpu else ift_result.numpy(),
-        )
+        if raw_data:
+            return (
+                max_indices.cpu().numpy() if use_gpu else max_indices.numpy(),
+                ift_result.cpu().numpy() if use_gpu else ift_result.numpy(),
+            )
+        else:
+            return (
+                max_indices.cpu().numpy() if use_gpu else max_indices.numpy(),
+                None,
+            )
 
 
 def remove_dc(array):
@@ -122,16 +128,21 @@ def remove_dc(array):
     return array
 
 
-def quadratic_subpixel_peak(array):
+def quadratic_subpixel_peak(array, use_gpu=True):
     """
     Find subpixel peak locations by fitting quadratics to local maxima.
     """
+    device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
+
     # Smooth the array to reduce noise
     # smoothed = gaussian_smooth_time(array, 20 * (fps / nmps) / frame_factor)
-    smoothed = array
+
     # Take sum of cubes over color channels of cross correlations
-    smoothed = (smoothed**3).sum(axis=-2)
-    
+    cubed = (array**3)
+    weights = torch.tensor([0.3, 1, 1], device=device)
+    weights = weights.view(1, 1, -1, 1)  # reshape for broadcasting
+    smoothed = (cubed * weights).sum(dim=2)
+        
     h, w, t = smoothed.shape
 
     flat = smoothed.view(-1, t)  # (h*w*c, t)
@@ -253,6 +264,7 @@ async def process_chunks_fixed_size(
     max_concurrent=4,
     max_workers=4,
     use_gpu=True,
+    raw_data=True,
 ):
     """
     Asynchronously process array in chunks with bounded parallelism.
@@ -290,7 +302,8 @@ async def process_chunks_fixed_size(
                     chunk = await asyncio.wrap_future(chunk_future)
 
                     # Process the chunk
-                    processed_result = cross_correlate(reference_chirp, chunk[:, :, 1:, :], use_gpu)  # drop blue channel
+                    # processed_result = cross_correlate(reference_chirp, chunk[:, :, 1:, :], use_gpu)  # drop blue channel
+                    processed_result = cross_correlate(reference_chirp, chunk, use_gpu, raw_data)  # drop blue channel
 
                     await result_queue.put(
                         {
