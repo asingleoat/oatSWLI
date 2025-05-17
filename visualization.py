@@ -26,12 +26,15 @@ def create_3d_surface_plot(heightmap, title="Heightmap"):
     )
     return fig
 
+
 def normalize_max_abs(arr):
     max_abs = np.max(np.abs(arr))
     return arr / max_abs if max_abs != 0 else arr
 
+
 def clip_negative(arr):
     return np.maximum(arr, 0)
+
 
 def setup_interactive_plots(metadata, ift_result, reference_chirp, crop_region):
     """
@@ -48,7 +51,9 @@ def setup_interactive_plots(metadata, ift_result, reference_chirp, crop_region):
     h_start, h_end, w_start, w_end = crop_region
     # Create figure for the video frame
     fig, ax = plt.subplots()
-    img_display = ax.imshow(metadata["frame"][h_start:h_end,w_start:w_end,:]) # , cmap="plasma")
+    img_display = ax.imshow(
+        metadata["frame"][h_start:h_end, w_start:w_end, :]
+    )  # , cmap="plasma")
     ax.set_title(f"First Frame")
     plt.colorbar(img_display)
 
@@ -75,13 +80,9 @@ def setup_interactive_plots(metadata, ift_result, reference_chirp, crop_region):
         [], [], label="Selected Pixel_b", color="blue"
     )
 
-    (sequence_plot_p,) = ax_sequence.plot(
-        [], [], label="product", color="orange"
-    )
+    (sequence_plot_p,) = ax_sequence.plot([], [], label="product", color="orange")
 
-    (sequence_plot_cube,) = ax_sequence.plot(
-        [], [], label="sum of cubes", color="pink"
-    )
+    (sequence_plot_cube,) = ax_sequence.plot([], [], label="sum of cubes", color="pink")
 
     # Define click handler
     def on_click(event):
@@ -92,9 +93,9 @@ def setup_interactive_plots(metadata, ift_result, reference_chirp, crop_region):
         x, y = int(event.ydata), int(event.xdata)
 
         sequence = ift_result[x, y, :].real / 1000
-        cubed_0 = np.power(sequence[0],3)
-        cubed_1 = np.power(sequence[1],3)
-        cubed_2 = np.power(sequence[2],3)
+        cubed_0 = np.power(sequence[0], 3)
+        cubed_1 = np.power(sequence[1], 3)
+        cubed_2 = np.power(sequence[2], 3)
         # Update plots
         sequence_plot_r.set_xdata(np.arange(sequence.shape[1]))
         sequence_plot_r.set_ydata(normalize_max_abs(sequence[-1]))
@@ -104,10 +105,11 @@ def setup_interactive_plots(metadata, ift_result, reference_chirp, crop_region):
         sequence_plot_b.set_ydata(normalize_max_abs(sequence[0]))
         sequence_plot_p.set_xdata(np.arange(sequence.shape[1]))
         sequence_plot_p.set_ydata(
-            normalize_max_abs(clip_negative(sequence[0])) * normalize_max_abs(clip_negative(sequence[-1])))
-        sequence_plot_cube.set_xdata(np.arange(sequence.shape[1]))            
-        sequence_plot_cube.set_ydata(2*
-            normalize_max_abs(cubed_0 + cubed_1 + cubed_2))
+            normalize_max_abs(clip_negative(sequence[0]))
+            * normalize_max_abs(clip_negative(sequence[-1]))
+        )
+        sequence_plot_cube.set_xdata(np.arange(sequence.shape[1]))
+        sequence_plot_cube.set_ydata(2 * normalize_max_abs(cubed_0 + cubed_1 + cubed_2))
 
         ax_sequence.relim()
         ax_sequence.autoscale_view()

@@ -58,8 +58,8 @@ async def main():
     shape = metadata["shape"]
 
     # if shape[2] == 3:
-        # drop blue, TODO, deal with noisy blue in a more principled manner
-        # shape = shape[0], shape[1], 2, shape[3]
+    # drop blue, TODO, deal with noisy blue in a more principled manner
+    # shape = shape[0], shape[1], 2, shape[3]
 
     h, w, c, t = shape
     # crop = False
@@ -86,7 +86,12 @@ async def main():
         chunks_to_process = ((h + chunk_h - 1) // chunk_h) * (
             (w + chunk_w - 1) // chunk_w
         )
-        print(available_sysram/ (1024**2), chunk_bytes/ (1024**2), max_concurrent, chunks_to_process)
+        print(
+            available_sysram / (1024**2),
+            chunk_bytes / (1024**2),
+            max_concurrent,
+            chunks_to_process,
+        )
 
     # Create reference chirp
     # point to extract reference chirp from
@@ -122,12 +127,12 @@ async def main():
         max_concurrent=max_concurrent,
         max_workers=max_concurrent,  # Use all available CPU cores
         use_gpu=args.gpu,
-        raw_data=args.plot2d
+        raw_data=args.plot2d,
     )
 
     # Reassemble results
     max_indices = np.zeros((shape[0], shape[1]))
-    if args.plot2d:    
+    if args.plot2d:
         ift_result = np.zeros((shape[0], shape[1], shape[2], shape[3]))
 
     while True:
@@ -141,7 +146,10 @@ async def main():
 
         if args.plot2d:
             ift_result[
-                chunk["y_start"] : chunk["y_end"], chunk["x_start"] : chunk["x_end"], :, :
+                chunk["y_start"] : chunk["y_end"],
+                chunk["x_start"] : chunk["x_end"],
+                :,
+                :,
             ] = chunk["result_right"]
 
         result_queue.task_done()

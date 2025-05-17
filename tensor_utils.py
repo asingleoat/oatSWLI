@@ -9,7 +9,8 @@ import os
 import concurrent.futures
 from image_processing import (
     load_video,
-    )
+)
+
 # async def gpu_worker(chunk, semaphore, output_queue):
 #     async with semaphore:
 #         result = await process_on_gpu(chunk)
@@ -138,11 +139,11 @@ def quadratic_subpixel_peak(array, use_gpu=True):
     # smoothed = gaussian_smooth_time(array, 20 * (fps / nmps) / frame_factor)
 
     # Take sum of cubes over color channels of cross correlations
-    cubed = (array**3)
+    cubed = array**3
     weights = torch.tensor([0.3, 1, 1], device=device)
     weights = weights.view(1, 1, -1, 1)  # reshape for broadcasting
     smoothed = (cubed * weights).sum(dim=2)
-        
+
     h, w, t = smoothed.shape
 
     flat = smoothed.view(-1, t)  # (h*w*c, t)
@@ -166,15 +167,16 @@ def quadratic_subpixel_peak(array, use_gpu=True):
 
     return subpixel_argmax.view(h, w)
 
-def estimate_cosine_peak_torch(array, device='cuda'):
+
+def estimate_cosine_peak_torch(array, device="cuda"):
     """
     Fit a cosine curve to x, y using PyTorch and return peak location (-phi / omega).
-    
+
     Parameters:
         x (np.ndarray or torch.Tensor): 1D array of x values
         y (np.ndarray or torch.Tensor): 1D array of y values
         device (str): 'cuda' or 'cpu'
-    
+
     Returns:
         peak_x (float): x-position of cosine peak
         fit_params (dict): dict with keys A, omega, phi, c
@@ -183,10 +185,12 @@ def estimate_cosine_peak_torch(array, device='cuda'):
     y = torch.as_tensor(np.arange(array.shape[0]), dtype=torch.float32, device=device)
 
     # Init parameters as torch tensors with gradients
-    A     = torch.tensor((y.max() - y.min()) / 2, device=device, requires_grad=True)
-    omega = torch.tensor(2 * torch.pi / (x[-1] - x[0]), device=device, requires_grad=True)
-    phi   = torch.tensor(0.0, device=device, requires_grad=True)
-    c     = torch.tensor(y.mean(), device=device, requires_grad=True)
+    A = torch.tensor((y.max() - y.min()) / 2, device=device, requires_grad=True)
+    omega = torch.tensor(
+        2 * torch.pi / (x[-1] - x[0]), device=device, requires_grad=True
+    )
+    phi = torch.tensor(0.0, device=device, requires_grad=True)
+    c = torch.tensor(y.mean(), device=device, requires_grad=True)
 
     params = [A, omega, phi, c]
 
@@ -195,11 +199,13 @@ def estimate_cosine_peak_torch(array, device='cuda'):
         return A * torch.cos(omega * x + phi) + c
 
     # Define closure for L-BFGS
-    optimizer = torch.optim.LBFGS(params, max_iter=1000, tolerance_grad=1e-10, tolerance_change=1e-12)
+    optimizer = torch.optim.LBFGS(
+        params, max_iter=1000, tolerance_grad=1e-10, tolerance_change=1e-12
+    )
 
     def closure():
         optimizer.zero_grad()
-        loss = torch.mean((model(x) - y)**2)
+        loss = torch.mean((model(x) - y) ** 2)
         loss.backward()
         return loss
 
@@ -212,7 +218,7 @@ def estimate_cosine_peak_torch(array, device='cuda'):
             "A": A.item(),
             "omega": omega.item(),
             "phi": phi.item(),
-            "c": c.item()
+            "c": c.item(),
         }
 
     return peak_x, fit_params
@@ -293,17 +299,22 @@ async def process_chunks_fixed_size(
     executor = concurrent.futures.ProcessPoolExecutor(max_workers=max_workers)
 
     try:
+
         async def process_chunk(x_start, x_end, y_start, y_end):
             async with semaphore:
                 try:
                     print(f"Running chunk: {x_start, x_end, y_start, y_end}")
                     # Parallelize chunk data loading
-                    chunk_future = executor.submit(load_video, filename, (x_start, x_end, y_start, y_end))
+                    chunk_future = executor.submit(
+                        load_video, filename, (x_start, x_end, y_start, y_end)
+                    )
                     chunk = await asyncio.wrap_future(chunk_future)
 
                     # Process the chunk
                     # processed_result = cross_correlate(reference_chirp, chunk[:, :, 1:, :], use_gpu)  # drop blue channel
-                    processed_result = cross_correlate(reference_chirp, chunk, use_gpu, raw_data)  # drop blue channel
+                    processed_result = cross_correlate(
+                        reference_chirp, chunk, use_gpu, raw_data
+                    )  # drop blue channel
 
                     await result_queue.put(
                         {
@@ -335,7 +346,9 @@ async def process_chunks_fixed_size(
                 chunk_counter += 1
                 print(f"Queuing chunk: {chunk_counter}")
 
-                task = asyncio.create_task(process_chunk(x_start, x_end, y_start, y_end))
+                task = asyncio.create_task(
+                    process_chunk(x_start, x_end, y_start, y_end)
+                )
                 tasks.append(task)
 
         # Wait for all chunks to be processed
