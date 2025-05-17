@@ -1,5 +1,10 @@
 # Still TODO
 
+## remove result queue
+switch to inserting directly into preallocated result array with a mutex
+
+## improve memory access patterns, no reason to use square chunks and they're worse for memory access
+
 ## CPU multithreading
 - the job is embarrasingly parallel. we should allow multicore CPU utilization when GPU acceleration isn't available.
 
