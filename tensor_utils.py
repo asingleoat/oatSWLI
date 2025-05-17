@@ -85,7 +85,7 @@ def cross_correlate(reference_chirp, video_array, use_gpu=True):
         device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
 
         video_torch = torch.tensor(video_array, device=device, dtype=torch.complex64)
-        # print(f"Tensor is on device: {video_torch.device}")
+        print(f"Tensor is on device: {video_torch.device}")
 
         fft_result = torch.fft.fftshift(torch.fft.fft(video_torch, dim=-1), dim=-1)
 
@@ -127,11 +127,11 @@ def quadratic_subpixel_peak(array):
     Find subpixel peak locations by fitting quadratics to local maxima.
     """
     # Smooth the array to reduce noise
-    smoothed = gaussian_smooth_time(array, 20 * (fps / nmps) / frame_factor)
-
-    # Take product over color channels of cross correlations
-    smoothed = smoothed.prod(axis=-2)
-
+    # smoothed = gaussian_smooth_time(array, 20 * (fps / nmps) / frame_factor)
+    smoothed = array
+    # Take sum of cubes over color channels of cross correlations
+    smoothed = (smoothed**3).sum(axis=-2)
+    
     h, w, t = smoothed.shape
 
     flat = smoothed.view(-1, t)  # (h*w*c, t)
@@ -154,6 +154,57 @@ def quadratic_subpixel_peak(array):
     subpixel_argmax = idx_clamped.float() + subpixel_offset
 
     return subpixel_argmax.view(h, w)
+
+def estimate_cosine_peak_torch(array, device='cuda'):
+    """
+    Fit a cosine curve to x, y using PyTorch and return peak location (-phi / omega).
+    
+    Parameters:
+        x (np.ndarray or torch.Tensor): 1D array of x values
+        y (np.ndarray or torch.Tensor): 1D array of y values
+        device (str): 'cuda' or 'cpu'
+    
+    Returns:
+        peak_x (float): x-position of cosine peak
+        fit_params (dict): dict with keys A, omega, phi, c
+    """
+    x = torch.as_tensor(array, dtype=torch.float32, device=device)
+    y = torch.as_tensor(np.arange(array.shape[0]), dtype=torch.float32, device=device)
+
+    # Init parameters as torch tensors with gradients
+    A     = torch.tensor((y.max() - y.min()) / 2, device=device, requires_grad=True)
+    omega = torch.tensor(2 * torch.pi / (x[-1] - x[0]), device=device, requires_grad=True)
+    phi   = torch.tensor(0.0, device=device, requires_grad=True)
+    c     = torch.tensor(y.mean(), device=device, requires_grad=True)
+
+    params = [A, omega, phi, c]
+
+    # Define model
+    def model(x):
+        return A * torch.cos(omega * x + phi) + c
+
+    # Define closure for L-BFGS
+    optimizer = torch.optim.LBFGS(params, max_iter=1000, tolerance_grad=1e-10, tolerance_change=1e-12)
+
+    def closure():
+        optimizer.zero_grad()
+        loss = torch.mean((model(x) - y)**2)
+        loss.backward()
+        return loss
+
+    optimizer.step(closure)
+
+    # Final values
+    with torch.no_grad():
+        peak_x = (-phi / omega).item()
+        fit_params = {
+            "A": A.item(),
+            "omega": omega.item(),
+            "phi": phi.item(),
+            "c": c.item()
+        }
+
+    return peak_x, fit_params
 
 
 def make_reference(video_array, x, y, use_gpu=True):
@@ -232,24 +283,33 @@ async def process_chunks_fixed_size(
     try:
         async def process_chunk(x_start, x_end, y_start, y_end):
             async with semaphore:
-                print(f"Running chunk: {x_start, x_end, y_start, y_end}")
-                # Parallelize chunk data loading
-                chunk_future = executor.submit(load_video, filename, (x_start, x_end, y_start, y_end))
-                chunk = await asyncio.wrap_future(chunk_future)
+                try:
+                    print(f"Running chunk: {x_start, x_end, y_start, y_end}")
+                    # Parallelize chunk data loading
+                    chunk_future = executor.submit(load_video, filename, (x_start, x_end, y_start, y_end))
+                    chunk = await asyncio.wrap_future(chunk_future)
 
-                # Process the chunk
-                processed_result = cross_correlate(reference_chirp, chunk[:, :, 1:, :], use_gpu)  # drop blue channel
+                    # Process the chunk
+                    processed_result = cross_correlate(reference_chirp, chunk[:, :, 1:, :], use_gpu)  # drop blue channel
 
-                await result_queue.put(
-                    {
-                        "x_start": x_start,
-                        "x_end": x_end,
-                        "y_start": y_start,
-                        "y_end": y_end,
-                        "result_left": processed_result[0],
-                        "result_right": processed_result[1],
-                    }
-                )
+                    await result_queue.put(
+                        {
+                            "x_start": x_start,
+                            "x_end": x_end,
+                            "y_start": y_start,
+                            "y_end": y_end,
+                            "result_left": processed_result[0],
+                            "result_right": processed_result[1],
+                        }
+                    )
+                except RuntimeError as e:
+                    if "out of memory" in str(e).lower():
+                        print("OOM — requeuing chunk")
+                        # await input_queue.put(chunk)
+                        torch.cuda.empty_cache()
+                        await asyncio.sleep(0.1)  # backoff
+                    else:
+                        raise  # propagate other errors
 
         # Create tasks for all chunks
         tasks = []

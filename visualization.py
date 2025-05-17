@@ -26,25 +26,30 @@ def create_3d_surface_plot(heightmap, title="Heightmap"):
     )
     return fig
 
+def normalize_max_abs(arr):
+    max_abs = np.max(np.abs(arr))
+    return arr / max_abs if max_abs != 0 else arr
 
-def setup_interactive_plots(video_array_BGR, ift_result, reference_chirp):
+def clip_negative(arr):
+    return np.maximum(arr, 0)
+
+def setup_interactive_plots(metadata, ift_result, reference_chirp, crop_region):
     """
     Set up interactive 2D plots for exploring video data.
 
     Args:
-        video_array_BGR: Video array with BGR channels
+
         ift_result: Cross-correlation results
         reference_chirp: Reference chirp used for correlation
 
     Returns:
         Tuple of (figure, axes) for the plots
     """
-    t_fixed = 0  # arbitrary choice of frame to display
-
+    h_start, h_end, w_start, w_end = crop_region
     # Create figure for the video frame
     fig, ax = plt.subplots()
-    img_display = ax.imshow(video_array_BGR[..., t_fixed], cmap="plasma")
-    ax.set_title(f"Frame no:{t_fixed}")
+    img_display = ax.imshow(metadata["frame"][h_start:h_end,w_start:w_end,:]) # , cmap="plasma")
+    ax.set_title(f"First Frame")
     plt.colorbar(img_display)
 
     # Create a second figure for plotting the intensity over time
@@ -70,6 +75,14 @@ def setup_interactive_plots(video_array_BGR, ift_result, reference_chirp):
         [], [], label="Selected Pixel_b", color="blue"
     )
 
+    (sequence_plot_p,) = ax_sequence.plot(
+        [], [], label="product", color="orange"
+    )
+
+    (sequence_plot_cube,) = ax_sequence.plot(
+        [], [], label="sum of cubes", color="pink"
+    )
+
     # Define click handler
     def on_click(event):
         # ignore clicks outside the image
@@ -82,11 +95,16 @@ def setup_interactive_plots(video_array_BGR, ift_result, reference_chirp):
 
         # Update plots
         sequence_plot_r.set_xdata(np.arange(sequence.shape[1]))
-        sequence_plot_r.set_ydata(sequence[-1])
+        sequence_plot_r.set_ydata(normalize_max_abs(sequence[-1]))
         sequence_plot_g.set_xdata(np.arange(sequence.shape[1]))
-        sequence_plot_g.set_ydata(sequence[-2])
+        sequence_plot_g.set_ydata(normalize_max_abs(sequence[-2]))
         sequence_plot_b.set_xdata(np.arange(sequence.shape[1]))
-        sequence_plot_b.set_ydata(sequence[0])
+        sequence_plot_b.set_ydata(normalize_max_abs(sequence[0]))
+        sequence_plot_p.set_xdata(np.arange(sequence.shape[1]))
+        sequence_plot_p.set_ydata(
+            normalize_max_abs(clip_negative(sequence[0])) * normalize_max_abs(clip_negative(sequence[-1])))
+        sequence_plot_cube.set_ydata(
+            normalize_max_abs(sequence[0]**3 + sequence[-1]**3))
 
         ax_sequence.relim()
         ax_sequence.autoscale_view()

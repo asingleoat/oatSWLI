@@ -7,6 +7,7 @@ import numpy as np
 import time
 import torch
 import os
+import psutil
 
 # Import our refactored modules
 from tensor_utils import (
@@ -48,7 +49,7 @@ async def main():
         "--plot3d", action="store_true", help="Show interactive 3D plots"
     )
     parser.add_argument(
-        "--chunk-size", type=int, default=128, help="Chunk size for processing"
+        "--chunk-size", type=int, default=64, help="Chunk size for processing"
     )
     args = parser.parse_args()
 
@@ -61,16 +62,16 @@ async def main():
         shape = shape[0], shape[1], 2, shape[3]
 
     h, w, c, t = shape
-    crop = False
-    # crop = True
+    # crop = False
+    crop = True
     # TODO: take in crop params from the CLI
     # may be the whole field, the trivial crop
     crop_region = (0, 128, 0, 128) if crop else (0, h, 0, w)
     shape = (crop_region[1], crop_region[3], c, t)
     chunk_h = chunk_w = args.chunk_size
 
+    max_concurrent = None
     if args.gpu:
-
         available_vram = get_available_vram()
         chunk_bytes = estimate_chunk_vram_usage((chunk_h, chunk_w, c, t))
         max_concurrent = max(1, available_vram // chunk_bytes)
@@ -78,16 +79,14 @@ async def main():
             (w + chunk_w - 1) // chunk_w
         )
         print(available_vram, chunk_bytes, max_concurrent, chunks_to_process)
-        # semaphore = asyncio.Semaphore(max_concurrent)
-        # output_queue = asyncio.Queue()
-
-    # tasks = []
-    # for i in range(20):  # 20 total chunks
-    #     chunk = await load_chunk(i)
-    #     task = asyncio.create_task(gpu_worker(chunk, semaphore, output_queue))
-    #     tasks.append(task)
-
-    # await asyncio.gather(*tasks)
+    else:
+        available_sysram = psutil.virtual_memory().available
+        chunk_bytes = estimate_chunk_vram_usage((chunk_h, chunk_w, c, t))
+        max_concurrent = max(1, available_sysram // chunk_bytes) // 4
+        chunks_to_process = ((h + chunk_h - 1) // chunk_h) * (
+            (w + chunk_w - 1) // chunk_w
+        )
+        print(available_sysram/ (1024**2), chunk_bytes/ (1024**2), max_concurrent, chunks_to_process)
 
     # Create reference chirp
     # point to extract reference chirp from
@@ -107,16 +106,13 @@ async def main():
     reference_chirp = make_reference_avg(
         video_array_chirp, window=chirp_window, use_gpu=args.gpu
     )
-
-    # Process video in chunks
-    if args.gpu:
-        max_concurrent = 4  # max(1, available_vram // chunk_bytes)
-    else:
-        max_concurrent = 4  # Default for CPU processing
-
-    def cross_correlate_chunk(v):
-        return cross_correlate(reference_chirp, v, use_gpu=args.gpu)
-
+    print("Shape of reference chirp: ", reference_chirp.shape)
+    # # Process video in chunks
+    # if args.gpu:
+    #     max_concurrent = 4  # max(1, available_vram // chunk_bytes)
+    # else:
+    #     max_concurrent = os.cpu_count()  # Default for CPU processing
+    max_concurrent = 1
     result_queue = await process_chunks_fixed_size(
         shape,
         reference_chirp,
@@ -125,6 +121,7 @@ async def main():
         chunk_w=chunk_w,
         max_concurrent=max_concurrent,
         max_workers=max_concurrent,  # Use all available CPU cores
+        use_gpu=args.gpu,
     )
 
     # Reassemble results
@@ -168,7 +165,7 @@ async def main():
 
     # Optionally show interactive 2D plots
     if args.plot2d:
-        setup_interactive_plots(video_array_BGR, ift_result, reference_chirp)
+        setup_interactive_plots(metadata, ift_result, reference_chirp, crop_region)
         import matplotlib.pyplot as plt
 
         plt.show()

@@ -10,13 +10,14 @@ pkgs.mkShell {
     freetype
     glfw
     (python312Packages.python.withPackages (ps: with ps; [
-      numpy
-      opencv4
       ffmpeg
       matplotlib
-      torch-bin
-      scipy
+      numpy
+      opencv4
       plotly
+      psutil
+      scipy
+      torch-bin
     ]))
     cudatoolkit  # Ensures CUDA libraries are available
   ];

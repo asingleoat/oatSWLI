@@ -23,6 +23,7 @@ def get_video_metadata(filename):
         "total_frames": t,
         "fps": cap.get(cv2.CAP_PROP_FPS),
         "channels": c,
+        "frame": frame,
     }
 
     cap.release()
