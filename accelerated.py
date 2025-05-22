@@ -51,6 +51,12 @@ async def main():
     parser.add_argument(
         "--chunk-size", type=int, default=64, help="Chunk size for processing"
     )
+    parser.add_argument(
+        "--peak-method", 
+        choices=["quadratic", "wavelet"], 
+        default="quadratic",
+        help="Method for subpixel peak detection"
+    )
     args = parser.parse_args()
 
     metadata = get_video_metadata(args.video_file)
@@ -128,6 +134,7 @@ async def main():
         max_workers=max_concurrent,  # Use all available CPU cores
         use_gpu=args.gpu,
         raw_data=args.plot2d,
+        peak_method=args.peak_method,
     )
 
     # Reassemble results
@@ -154,6 +161,37 @@ async def main():
 
         result_queue.task_done()
 
+    # Initialize frequencies variable
+    frequencies = None
+    
+    # Reassemble results
+    max_indices = np.zeros((shape[0], shape[1]))
+    if args.plot2d:
+        ift_result = np.zeros((shape[0], shape[1], shape[2], shape[3]))
+
+    while True:
+        chunk = await result_queue.get()
+        if chunk is None:
+            break
+
+        max_indices[
+            chunk["y_start"] : chunk["y_end"], chunk["x_start"] : chunk["x_end"]
+        ] = chunk["result_left"]
+
+        # Capture frequencies if using wavelet method
+        if args.peak_method == "wavelet" and "frequencies" in chunk and chunk["frequencies"] is not None:
+            frequencies = chunk["frequencies"]
+
+        if args.plot2d:
+            ift_result[
+                chunk["y_start"] : chunk["y_end"],
+                chunk["x_start"] : chunk["x_end"],
+                :,
+                :,
+            ] = chunk["result_right"]
+
+        result_queue.task_done()
+
     # Post-process height map
     max_indices = remove_tilt_grayscale(max_indices)
 
@@ -164,6 +202,10 @@ async def main():
     # Save results
     np.save("array.npy", max_indices)
     normalize_and_save(max_indices, "out.png")
+    
+    # Save frequency information if using wavelet method
+    if args.peak_method == "wavelet" and frequencies is not None:
+        np.save("estimated_frequencies.npy", frequencies.cpu().numpy() if hasattr(frequencies, 'cpu') else frequencies)
 
     # Report timing
     end_time = time.perf_counter()

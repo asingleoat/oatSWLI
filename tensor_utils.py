@@ -75,12 +75,22 @@ def gaussian_smooth_time(array, sigma, truncate=4.0):
     return smoothed
 
 
-def cross_correlate(reference_chirp, video_array, use_gpu=True, raw_data=True):
+def cross_correlate(reference_chirp, video_array, use_gpu=True, raw_data=True, peak_method="quadratic"):
     """
     Cross-correlate reference chirp with video array using FFT.
-
-    Uses the convolution theorem to compute cross-correlations in O(n log n) time
-    instead of O(n^2) time by transforming to frequency space.
+    
+    Args:
+        reference_chirp: Reference signal
+        video_array: Video data
+        use_gpu: Whether to use GPU
+        raw_data: Whether to return raw correlation data
+        peak_method: "quadratic" or "wavelet" for subpixel peak finding
+        
+    Returns:
+        If peak_method is "quadratic":
+            (max_indices, ift_result) if raw_data=True, else (max_indices, None)
+        If peak_method is "wavelet":
+            (max_indices, ift_result, frequencies) if raw_data=True, else (max_indices, None, frequencies)
     """
     with torch.no_grad():
         device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
@@ -102,19 +112,39 @@ def cross_correlate(reference_chirp, video_array, use_gpu=True, raw_data=True):
             torch.fft.ifft(torch.fft.ifftshift(products, dim=-1), dim=-1).real, dim=-1
         )
 
-        # Find subpixel peaks for precise alignment
-        max_indices = quadratic_subpixel_peak(ift_result)
-
-        if raw_data:
-            return (
-                max_indices.cpu().numpy() if use_gpu else max_indices.numpy(),
-                ift_result.cpu().numpy() if use_gpu else ift_result.numpy(),
-            )
+        # Use specified peak finding method
+        if peak_method == "wavelet":
+            peak_result = wavelet_subpixel_peak(ift_result, use_gpu)
+            max_indices, frequencies = peak_result
+            # Store frequencies for later use
         else:
-            return (
-                max_indices.cpu().numpy() if use_gpu else max_indices.numpy(),
-                None,
-            )
+            max_indices = quadratic_subpixel_peak(ift_result, use_gpu, method="quadratic")
+
+        if peak_method == "wavelet":
+            frequencies_cpu = frequencies.cpu() if use_gpu else frequencies
+            if raw_data:
+                return (
+                    max_indices.cpu().numpy() if use_gpu else max_indices.numpy(),
+                    ift_result.cpu().numpy() if use_gpu else ift_result.numpy(),
+                    frequencies_cpu.numpy(),
+                )
+            else:
+                return (
+                    max_indices.cpu().numpy() if use_gpu else max_indices.numpy(),
+                    None,
+                    frequencies_cpu.numpy(),
+                )
+        else:
+            if raw_data:
+                return (
+                    max_indices.cpu().numpy() if use_gpu else max_indices.numpy(),
+                    ift_result.cpu().numpy() if use_gpu else ift_result.numpy(),
+                )
+            else:
+                return (
+                    max_indices.cpu().numpy() if use_gpu else max_indices.numpy(),
+                    None,
+                )
 
 
 def remove_dc(array):
@@ -129,15 +159,24 @@ def remove_dc(array):
     return array
 
 
-def quadratic_subpixel_peak(array, use_gpu=True):
+def quadratic_subpixel_peak(array, use_gpu=True, method="quadratic"):
     """
-    Find subpixel peak locations by fitting quadratics to local maxima.
+    Find subpixel peak locations using specified method.
+    
+    Args:
+        array: Input correlation array
+        use_gpu: Whether to use GPU
+        method: "quadratic" or "wavelet"
+    
+    Returns:
+        Subpixel peak positions (and frequencies if wavelet method)
     """
+    if method == "wavelet":
+        return wavelet_subpixel_peak(array, use_gpu)
+    
+    # Original quadratic method (unchanged)
     device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
-
-    # Smooth the array to reduce noise
-    # smoothed = gaussian_smooth_time(array, 20 * (fps / nmps) / frame_factor)
-
+    
     # Take sum of cubes over color channels of cross correlations
     cubed = array**3
     weights = torch.tensor([0.3, 1, 1], device=device)
@@ -166,6 +205,175 @@ def quadratic_subpixel_peak(array, use_gpu=True):
     subpixel_argmax = idx_clamped.float() + subpixel_offset
 
     return subpixel_argmax.view(h, w)
+
+
+def wavelet_subpixel_peak(array, use_gpu=True, window_size=20):
+    """
+    Find subpixel peak locations by fitting enveloped cosines to correlation peaks.
+    
+    Args:
+        array: Cross-correlation result tensor (h, w, c, t)
+        use_gpu: Whether to use GPU acceleration
+        window_size: Size of window around peak for fitting
+    
+    Returns:
+        Tuple of (peak_positions, frequencies) where:
+        - peak_positions: (h, w) tensor of subpixel peak locations
+        - frequencies: (c,) tensor of fitted frequencies per channel
+    """
+    device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
+    
+    # Get initial peak estimates using existing quadratic method
+    initial_peaks = quadratic_subpixel_peak(array, use_gpu, method="quadratic")
+    
+    h, w, c, t = array.shape
+    
+    # Estimate frequency per channel by analyzing multiple regions
+    frequencies = torch.zeros(c, device=device)
+
+    for channel in range(c):
+        # Use multiple regions for better frequency estimation
+        regions = []
+        for i in range(0, h, h//4):
+            for j in range(0, w, w//4):
+                end_i, end_j = min(i+32, h), min(j+32, w)
+                if end_i - i >= 16 and end_j - j >= 16:
+                    regions.append(array[i:end_i, j:end_j, channel, :].mean(dim=(0,1)))
+        
+        if regions:
+            # Average across regions for more stable frequency estimate
+            avg_correlation = torch.stack(regions).mean(dim=0)
+            
+            # Use autocorrelation to find dominant frequency
+            autocorr = torch.fft.ifft(torch.abs(torch.fft.fft(avg_correlation))**2).real
+            
+            # Find first significant peak after zero lag
+            autocorr_half = autocorr[1:t//2]
+            peak_idx = torch.argmax(autocorr_half) + 1
+            frequencies[channel] = 2 * torch.pi * peak_idx / t
+        else:
+            # Fallback to default frequency
+            frequencies[channel] = 2 * torch.pi / (t // 4)
+    
+    # Flatten spatial dimensions for batch processing
+    flat_peaks = initial_peaks.flatten()
+    flat_array = array.view(-1, c, t)  # (h*w, c, t)
+
+    refined_peaks_flat = torch.zeros_like(flat_peaks)
+
+    # Process in batches to avoid memory issues
+    batch_size = min(1000, len(flat_peaks))
+    for batch_start in range(0, len(flat_peaks), batch_size):
+        batch_end = min(batch_start + batch_size, len(flat_peaks))
+        batch_indices = torch.arange(batch_start, batch_end, device=device)
+        
+        # Batch process the fitting for this subset
+        for channel in range(c):
+            batch_refined = batch_fit_enveloped_cosine(
+                flat_array[batch_indices, channel, :],
+                flat_peaks[batch_indices],
+                frequencies[channel],
+                window_size,
+                device
+            )
+            refined_peaks_flat[batch_indices] = batch_refined
+
+    refined_peaks = refined_peaks_flat.view(h, w)
+    
+    return refined_peaks, frequencies
+
+
+def fit_enveloped_cosine(t, y, omega, initial_guess, device="cuda", max_iter=100):
+    """
+    Fit an enveloped cosine to data: A * exp(-((t-t0)/sigma)^2) * cos(omega*(t-t0) + phi) + offset
+    
+    Args:
+        t: Time indices
+        y: Signal values
+        omega: Known frequency
+        initial_guess: Initial guess for peak position t0
+        device: Computing device
+        max_iter: Maximum optimization iterations
+    
+    Returns:
+        Refined peak position t0
+    """
+    # Ensure y requires gradients and is on the correct device
+    y = y.detach().clone().to(device)
+    t = t.detach().clone().to(device)
+    
+    # Initialize parameters
+    A = torch.tensor(y.max().item() - y.min().item(), device=device, requires_grad=True)
+    t0 = torch.tensor(float(initial_guess), device=device, requires_grad=True)
+    sigma = torch.tensor(len(t) / 4.0, device=device, requires_grad=True)
+    phi = torch.tensor(0.0, device=device, requires_grad=True)
+    offset = torch.tensor(y.mean().item(), device=device, requires_grad=True)
+    
+    params = [A, t0, sigma, phi, offset]
+    
+    def model(t_vals):
+        envelope = torch.exp(-((t_vals - t0) / sigma) ** 2)
+        oscillation = torch.cos(omega * (t_vals - t0) + phi)
+        return A * envelope * oscillation + offset
+    
+    optimizer = torch.optim.Adam(params, lr=0.01)
+    
+    for _ in range(max_iter):
+        optimizer.zero_grad()
+        pred = model(t)
+        loss = torch.mean((pred - y) ** 2)
+        
+        # Add regularization to keep parameters reasonable
+        reg_loss = 0.001 * (torch.abs(A) + torch.abs(sigma - len(t)/4.0))
+        total_loss = loss + reg_loss
+        
+        # Check if loss requires grad before backward
+        if total_loss.requires_grad:
+            total_loss.backward()
+            optimizer.step()
+        
+        # Clamp parameters to reasonable ranges
+        with torch.no_grad():
+            sigma.clamp_(min=1.0, max=len(t))
+            t0.clamp_(min=t[0].item(), max=t[-1].item())
+    
+    return t0.detach()
+
+
+def batch_fit_enveloped_cosine(batch_data, initial_peaks, omega, window_size, device):
+    """
+    Batch process multiple enveloped cosine fits simultaneously.
+    
+    Args:
+        batch_data: (batch_size, t) tensor of correlation data
+        initial_peaks: (batch_size,) tensor of initial peak estimates
+        omega: Scalar frequency value
+        window_size: Window size around peaks
+        device: Computing device
+    
+    Returns:
+        (batch_size,) tensor of refined peak positions
+    """
+    batch_size, t = batch_data.shape
+    refined_peaks = torch.zeros(batch_size, device=device)
+    
+    for i in range(batch_size):
+        peak_idx = int(initial_peaks[i].round())
+        start_idx = max(0, peak_idx - window_size // 2)
+        end_idx = min(t, peak_idx + window_size // 2)
+        
+        if end_idx - start_idx < 10:
+            refined_peaks[i] = initial_peaks[i]
+            continue
+            
+        window_data = batch_data[i, start_idx:end_idx]
+        window_indices = torch.arange(start_idx, end_idx, device=device, dtype=torch.float32)
+        
+        refined_peaks[i] = fit_enveloped_cosine(
+            window_indices, window_data, omega, peak_idx, device, max_iter=50
+        )
+    
+    return refined_peaks
 
 
 def estimate_cosine_peak_torch(array, device="cuda"):
@@ -271,6 +479,7 @@ async def process_chunks_fixed_size(
     max_workers=4,
     use_gpu=True,
     raw_data=True,
+    peak_method="quadratic",
 ):
     """
     Asynchronously process array in chunks with bounded parallelism.
@@ -313,19 +522,33 @@ async def process_chunks_fixed_size(
                     # Process the chunk
                     # processed_result = cross_correlate(reference_chirp, chunk[:, :, 1:, :], use_gpu)  # drop blue channel
                     processed_result = cross_correlate(
-                        reference_chirp, chunk, use_gpu, raw_data
+                        reference_chirp, chunk, use_gpu, raw_data, peak_method
                     )  # drop blue channel
 
-                    await result_queue.put(
-                        {
-                            "x_start": x_start,
-                            "x_end": x_end,
-                            "y_start": y_start,
-                            "y_end": y_end,
-                            "result_left": processed_result[0],
-                            "result_right": processed_result[1],
-                        }
-                    )
+                    if peak_method == "wavelet":
+                        max_indices_result, frequencies_result = processed_result[0], processed_result[2] if len(processed_result) > 2 else None
+                        await result_queue.put(
+                            {
+                                "x_start": x_start,
+                                "x_end": x_end,
+                                "y_start": y_start,
+                                "y_end": y_end,
+                                "result_left": max_indices_result,
+                                "result_right": processed_result[1],
+                                "frequencies": frequencies_result,
+                            }
+                        )
+                    else:
+                        await result_queue.put(
+                            {
+                                "x_start": x_start,
+                                "x_end": x_end,
+                                "y_start": y_start,
+                                "y_end": y_end,
+                                "result_left": processed_result[0],
+                                "result_right": processed_result[1],
+                            }
+                        )
                 except RuntimeError as e:
                     if "out of memory" in str(e).lower():
                         print("OOM — requeuing chunk")
