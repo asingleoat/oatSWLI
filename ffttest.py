@@ -1,7 +1,7 @@
 import numpy as np
 import time
 
-shape = (2**10, 2**10)
+shape = (2**10, 2**6, 2**6)
 
 # Data to convolve
 np.random.seed(1)
@@ -11,52 +11,6 @@ b_host = np.random.rand(*shape).astype(np.complex64)
 
 # -------------------- CUDA --------------------
 from pycuda.elementwise import ElementwiseKernel
-
-cuda_pointwise_mul = ElementwiseKernel(
-    "pycuda::complex<float> *x, pycuda::complex<float> *y, pycuda::complex<float> *out",
-    "out[i] = x[i] * y[i]",
-    "cuda_pointwise_mul",
-)
-
-
-def benchmark_cuda(a_host, b_host):
-    import pycuda.driver as drv
-    import pycuda.gpuarray as cua
-    from pyvkfft.fft import fftn, ifftn
-    from pyvkfft.cuda import VkFFTApp
-
-    drv.init()
-    ctx = drv.Device(0).make_context()
-    ctx.push()
-
-    try:
-        a_gpu = cua.to_gpu(a_host)
-        b_gpu = cua.to_gpu(b_host)
-        plan = VkFFTApp(
-            a_gpu.shape, inplace=True, norm=2, dtype=np.complex64, enable_tuning=True
-        )
-        drv.Context.synchronize()
-
-        start = time.time()
-        A = plan.fft(a_gpu)
-        B = plan.fft(b_gpu)
-
-        prod = cua.empty_like(A)
-        cuda_pointwise_mul(A, B, prod)
-        C = prod
-
-        c_gpu = plan.ifft(C)
-        drv.Context.synchronize()
-        end = time.time()
-
-        c_result = c_gpu.get()
-        print(f"CUDA convolution: {end - start:.4f}s")
-
-    finally:
-        ctx.pop()
-        ctx.detach()
-        return c_result
-
 
 import pycuda.driver as drv
 import pycuda.gpuarray as cua
@@ -73,10 +27,24 @@ class CUDAConvolver:
 
         shape = reference.shape
         self.plan = vkfft_cuda.VkFFTApp(
-            shape, inplace=False, norm=2, dtype=dtype, enable_tuning=True
+            shape,
+            inplace=False,
+            norm=2,
+            dtype=dtype,
+            enable_tuning=True,
+            axes=[-1],
+            ndim=1,
+            backend="cuda",
         )
         self.plan_inplace = vkfft_cuda.VkFFTApp(
-            shape, inplace=True, norm=2, dtype=dtype, enable_tuning=True
+            shape,
+            inplace=True,
+            norm=2,
+            dtype=dtype,
+            enable_tuning=True,
+            axes=[-1],
+            ndim=1,
+            backend="cuda",
         )
 
         self.cuda_mul_kernel = ElementwiseKernel(
@@ -84,19 +52,23 @@ class CUDAConvolver:
             "out[i] = x[i] * y[i]",
             "cuda_pointwise_mul",
         )
+
         self.b_dev = cua.to_gpu(reference)
         self.a_ift = cua.empty_like(self.b_dev)  # preallocated
+        self.a_fft = cua.empty_like(self.b_dev)  # preallocated
         self.a_result = cua.empty_like(self.b_dev)  # preallocated
         self.plan_inplace.fft(self.b_dev)
 
     def run(self, a_host):
         a_dev = cua.to_gpu(a_host)
         start = time.time()
-        self.plan_inplace.fft(a_dev)
-        self.cuda_mul_kernel(a_dev, self.b_dev, self.a_result)
+        self.plan.fft(a_dev, self.a_fft)
+        self.cuda_mul_kernel(self.a_fft, self.b_dev, self.a_result)
         self.plan.ifft(self.a_result, self.a_ift)
+        r0 = self.a_ift.get()
+        r1 = self.a_result.get()
         end = time.time()
-        return (self.a_ift.get(), self.a_result.get(), end - start)
+        return (r0, r1, end - start)
 
     def close(self):
         self.ctx.pop()
@@ -104,54 +76,6 @@ class CUDAConvolver:
 
 
 # -------------------- OpenCL --------------------
-def benchmark_opencl(a_host, b_host):
-    import pyopencl as cl
-    import pyopencl.array as cla
-    from pyvkfft.fft import fftn, ifftn
-
-    platform = cl.get_platforms()[0]
-    device = platform.get_devices()[0]
-    # Create OpenCL context and queue
-    ctx = cl.Context([device])
-    queue = cl.CommandQueue(ctx)
-
-    from pyopencl.elementwise import ElementwiseKernel as ClElementwiseKernel
-
-    context = queue.context
-    cl_pointwise_mul = ClElementwiseKernel(
-        context,
-        """
-        __global const float2 *x,
-        __global const float2 *y,
-        __global float2 *out
-        """,
-        """
-        out[i].x = x[i].x * y[i].x - x[i].y * y[i].y;
-        out[i].y = x[i].x * y[i].y + x[i].y * y[i].x;
-        """,
-        "cl_pointwise_mul",
-    )
-
-    a_cl = cla.to_device(queue, a_host)
-    b_cl = cla.to_device(queue, b_host)
-
-    queue.finish()
-    start = time.time()
-    A = fftn(a_cl)
-    B = fftn(b_cl)
-    prod = cl.array.empty_like(A)
-    cl_pointwise_mul(A, B, prod)
-    C = prod
-
-    c_cl = ifftn(C)
-    queue.finish()
-    end = time.time()
-
-    c_result = c_cl.get()
-    print(f"OpenCL convolution: {end - start:.4f}s")
-    return c_result
-
-
 import pyopencl as cl
 import pyopencl.array as cl_array
 import pyvkfft.opencl as vkfft_opencl
@@ -168,10 +92,24 @@ class OpenCLConvolver:
 
         shape = reference.shape
         self.plan = vkfft_opencl.VkFFTApp(
-            shape=shape, inplace=False, norm=2, dtype=dtype, queue=self.queue
+            shape=shape,
+            inplace=False,
+            norm=2,
+            dtype=dtype,
+            queue=self.queue,
+            axes=[-1],
+            ndim=1,
+            backend="opencl",
         )
         self.plan_inplace = vkfft_opencl.VkFFTApp(
-            shape=shape, inplace=True, norm=2, dtype=dtype, queue=self.queue
+            shape=shape,
+            inplace=True,
+            norm=2,
+            dtype=dtype,
+            queue=self.queue,
+            axes=[-1],
+            ndim=1,
+            backend="opencl",
         )
 
         self.mul_kernel = cl.elementwise.ElementwiseKernel(
@@ -194,62 +132,67 @@ class OpenCLConvolver:
         self.plan_inplace.fft(a_dev)
         self.mul_kernel(a_dev, self.b_dev, self.a_result)
         self.plan.ifft(self.a_result, self.a_ift)
+        r0, r1 = (self.a_ift.get(), self.a_result.get())
         end = time.time()
-        return (self.a_ift.get(), self.a_result.get(), end - start)
+        return (r0, r1, end - start)
+
 
 import torch
-class TorchConvolver:
-    def __init__(self, dtype=torch.complex64):
-        self.dtype = dtype
 
-    def run(self, a_host, b_host):
+
+class TorchConvolver:
+    def __init__(self, reference, dtype=torch.complex64):
+        self.dtype = dtype
+        self.b = torch.fft.fft(
+            torch.tensor(reference, device="cuda", dtype=self.dtype), dim=-1
+        )
+
+    def run(self, a_host):
         a = torch.tensor(a_host, device="cuda", dtype=self.dtype)
-        b = torch.tensor(b_host, device="cuda", dtype=self.dtype)
         start = time.time()
-        result = torch.fft.ifftn(torch.fft.fftn(a) * torch.fft.fftn(b))
+        fft_result = torch.fft.fft(a, dim=-1) * self.b
+        result = torch.fft.ifft(fft_result, dim=-1)
+        r0, r1 = (result.cpu().numpy(), fft_result.cpu().numpy())
         end = time.time()
-        return (result.cpu().numpy(), end - start)
+        return (r0, r1, end - start)
 
 
 def benchmark_torch(a_host, b_host):
+    start = time.time()
+
     a = torch.from_numpy(a_host).to(device="cuda", dtype=torch.complex64)
     b = torch.from_numpy(b_host).to(device="cuda", dtype=torch.complex64)
 
     torch.cuda.synchronize()
-    start = time.time()
-    result = torch.fft.ifft2(torch.fft.fft2(a) * torch.fft.fft2(b))
+    fft_result = torch.fft.fft(a, dim=-1) * torch.fft.fft(b, dim=-1)
+    result = torch.fft.ifft(fft_result)
     torch.cuda.synchronize()
+    r0, r1 = result.cpu().numpy(), fft_result.cpu().numpy()
     end = time.time()
-
-    print(f"PyTorch convolution: {end - start:.4f}s")
-    return result
+    return (r0, r1, end - start)
 
 
 def benchmark_cpu(a_host, b_host):
+    fb = np.fft.fft(b_host, axis=-1)  # this one can be precomputed
+
     start = time.time()
-    fa = np.fft.fft2(a_host)
-    fb = np.fft.fft2(b_host)
+    fa = np.fft.fft(a_host, axis=-1)
     fc = fa * fb
-    result = np.fft.ifft2(fc).real
+    result = np.fft.ifft(fc, axis=-1).real
     end = time.time()
     duration = end - start
-
     return result, fc, duration
 
 
 if __name__ == "__main__":
-    print("One off benchmarks:")
-    result_opencl = benchmark_opencl(a_host, b_host)
-    print(f"OpenCL checksum: {np.sum(np.abs(result_opencl))}\n")
-    result_torch = benchmark_torch(a_host, b_host)
-    print(f"Torch checksum: {result_torch.abs().sum().item()}\n")
-    result_cuda = benchmark_cuda(a_host, b_host)
-    print(f"CUDA checksum: {np.sum(np.abs(result_cuda))}\n")
+    # (result_torch, fft_result, runtime) = benchmark_torch(a_host, b_host)
+    # print(f"PyTorch convolution: {runtime:.4f}s")
+    # print(f"Torch checksum: {np.sum(np.abs(result_torch))}\n")
 
-    (result_cpu, fft_cpu, runtime) = benchmark_cpu(a_host, b_host)
-    print(f"CPU convolution: {runtime:.4f}s")
-    print(f"CPU checksum: {np.sum(np.abs(result_cpu))}")
-    print(f"CPU fft checksum: {np.sum(np.abs(fft_cpu))}\n")
+    # (result_cpu, fft_cpu, runtime) = benchmark_cpu(a_host, b_host)
+    # print(f"CPU convolution: {runtime:.4f}s")
+    # print(f"CPU checksum: {np.sum(np.abs(result_cpu))}")
+    # print(f"CPU fft checksum: {np.sum(np.abs(fft_cpu))}\n")
 
     print("Context reuse benchmarks:")
     opencl_conv = OpenCLConvolver(b_host, dtype=np.complex64)
@@ -269,9 +212,10 @@ if __name__ == "__main__":
     print(f"CUDA fft checksum: {np.sum(np.abs(fft_cuda))}\n")
     cuda_conv.close()
 
-    torch_conv = TorchConvolver(dtype=torch.complex64)
-    (result_torch, runtime) = torch_conv.run(a_host, b_host)
-    print(f"Cold TORCH convolution: {runtime:.4f}s")
-    (result_torch, runtime) = torch_conv.run(a_host, b_host)
-    print(f"Warm TORCH convolution: {runtime*1000:.4f}ms")
-    print(f"TORCH checksum: {np.sum(np.abs(result_torch))}\n")
+    # torch_conv = TorchConvolver(b_host, dtype=torch.complex64)
+    # (result_torch, fft_torch, runtime) = torch_conv.run(a_host)
+    # print(f"Cold TORCH convolution: {runtime:.4f}s")
+    # (result_torch, fft_torch, runtime) = torch_conv.run(a_host)
+    # print(f"Warm TORCH convolution: {runtime*1000:.4f}ms")
+    # print(f"TORCH checksum: {np.sum(np.abs(result_torch))}")
+    # print(f"TORCH fft checksum: {np.sum(np.abs(fft_torch))}\n")
