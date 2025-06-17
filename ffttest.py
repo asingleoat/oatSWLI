@@ -1,13 +1,17 @@
 import numpy as np
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
+import os
 
-shape = (2**10, 2**6, 2**6)
+shape = (1920, 1080, 60*1)
 
 # Data to convolve
 np.random.seed(1)
 a_host = np.random.rand(*shape).astype(np.complex64)
 b_host = np.random.rand(*shape).astype(np.complex64)
-
+b_host_vec = np.random.rand(shape[2]).astype(np.complex64)
+fb_vector = np.fft.fft(b_host_vec, axis=-1)
 
 # -------------------- CUDA --------------------
 from pycuda.elementwise import ElementwiseKernel
@@ -172,8 +176,8 @@ def benchmark_torch(a_host, b_host):
     return (r0, r1, end - start)
 
 
-def benchmark_cpu(a_host, b_host):
-    fb = np.fft.fft(b_host, axis=-1)  # this one can be precomputed
+def benchmark_cpu_single_threaded(a_host, b_host):
+    fb = b_host # np.fft.fft(b_host, axis=-1)  # this one can be precomputed
 
     start = time.time()
     fa = np.fft.fft(a_host, axis=-1)
@@ -183,34 +187,85 @@ def benchmark_cpu(a_host, b_host):
     duration = end - start
     return result, fc, duration
 
+def benchmark_cpu_multi_threaded(a_host, b_host):
+    num_cores = os.cpu_count()
+    
+    chunk_size = a_host.shape[0] // num_cores
+    chunks = []
+    
+    for i in range(num_cores):
+        start_idx = i * chunk_size
+        if i == num_cores - 1:  # Last chunk gets remainder
+            end_idx = a_host.shape[0]
+        else:
+            end_idx = (i + 1) * chunk_size
+        chunks.append((start_idx, end_idx))
+    
+    def process_chunk(start_idx, end_idx):
+        a_chunk = a_host[start_idx:end_idx]
+        
+        fa_chunk = np.fft.fft(a_chunk, axis=-1)
+        fc_chunk = fa_chunk * fb_vector
+        result_chunk = np.fft.ifft(fc_chunk, axis=-1).real
+        return result_chunk, fc_chunk
+    
+    start = time.time()
+    
+    with ThreadPoolExecutor(max_workers=num_cores) as executor:
+        futures = [executor.submit(process_chunk, start_idx, end_idx) 
+                  for start_idx, end_idx in chunks]
+        
+        chunk_results = []
+        chunk_ffts = []
+        for future in futures:
+            result_chunk, fc_chunk = future.result()
+            chunk_results.append(result_chunk)
+            chunk_ffts.append(fc_chunk)
+    
+    # PARALLELISM OPPORTUNITY: Could pre-allocate output arrays and write chunks directly
+    # to avoid concatenation step entirely
+    result = np.concatenate(chunk_results, axis=0)
+    fc = np.concatenate(chunk_ffts, axis=0)
+    
+    end = time.time()
+    duration = end - start
+    return result, fc, duration
+
+
 
 if __name__ == "__main__":
     # (result_torch, fft_result, runtime) = benchmark_torch(a_host, b_host)
     # print(f"PyTorch convolution: {runtime:.4f}s")
     # print(f"Torch checksum: {np.sum(np.abs(result_torch))}\n")
 
-    # (result_cpu, fft_cpu, runtime) = benchmark_cpu(a_host, b_host)
-    # print(f"CPU convolution: {runtime:.4f}s")
-    # print(f"CPU checksum: {np.sum(np.abs(result_cpu))}")
-    # print(f"CPU fft checksum: {np.sum(np.abs(fft_cpu))}\n")
+    (result_cpu, fft_cpu, runtime) = benchmark_cpu_single_threaded(a_host, fb_vector)
+    print(f"CPU convolution: {runtime:.4f}s")
+    print(f"CPU checksum: {np.sum(np.abs(result_cpu))}")
+    print(f"CPU fft checksum: {np.sum(np.abs(fft_cpu))}\n")
 
-    print("Context reuse benchmarks:")
-    opencl_conv = OpenCLConvolver(b_host, dtype=np.complex64)
-    (result_opencl, fft_opencl, runtime) = opencl_conv.run(a_host)
-    print(f"Cold OpenCL convolution: {runtime:.4f}s")
-    (result_opencl, fft_opencl, runtime) = opencl_conv.run(a_host)
-    print(f"Warm OpenCL convolution: {runtime*1000:.4f}ms")
-    print(f"OpenCL checksum: {np.sum(np.abs(result_opencl))}")
-    print(f"OpenCL fft checksum: {np.sum(np.abs(fft_opencl))}\n")
+    (result_cpu, fft_cpu, runtime) = benchmark_cpu_multi_threaded(a_host, fb_vector)
+    print(f"CPU convolution: {runtime:.4f}s")
+    print(f"CPU checksum: {np.sum(np.abs(result_cpu))}")
+    print(f"CPU fft checksum: {np.sum(np.abs(fft_cpu))}\n")
 
-    cuda_conv = CUDAConvolver(b_host, dtype=np.complex64)
-    (result_cuda, fft_cuda, runtime) = cuda_conv.run(a_host)
-    print(f"Cold CUDA convolution: {runtime:.4f}s")
-    (result_cuda, fft_cuda, runtime) = cuda_conv.run(a_host)
-    print(f"Warm CUDA convolution: {runtime*1000:.4f}ms")
-    print(f"CUDA checksum: {np.sum(np.abs(result_cuda))}")
-    print(f"CUDA fft checksum: {np.sum(np.abs(fft_cuda))}\n")
-    cuda_conv.close()
+    
+    # print("Context reuse benchmarks:")
+    # opencl_conv = OpenCLConvolver(b_host, dtype=np.complex64)
+    # (result_opencl, fft_opencl, runtime) = opencl_conv.run(a_host)
+    # print(f"Cold OpenCL convolution: {runtime:.4f}s")
+    # (result_opencl, fft_opencl, runtime) = opencl_conv.run(a_host)
+    # print(f"Warm OpenCL convolution: {runtime*1000:.4f}ms")
+    # print(f"OpenCL checksum: {np.sum(np.abs(result_opencl))}")
+    # print(f"OpenCL fft checksum: {np.sum(np.abs(fft_opencl))}\n")
+
+    # cuda_conv = CUDAConvolver(b_host, dtype=np.complex64)
+    # (result_cuda, fft_cuda, runtime) = cuda_conv.run(a_host)
+    # print(f"Cold CUDA convolution: {runtime:.4f}s")
+    # (result_cuda, fft_cuda, runtime) = cuda_conv.run(a_host)
+    # print(f"Warm CUDA convolution: {runtime*1000:.4f}ms")
+    # print(f"CUDA checksum: {np.sum(np.abs(result_cuda))}")
+    # print(f"CUDA fft checksum: {np.sum(np.abs(fft_cuda))}\n")
+    # cuda_conv.close()
 
     # torch_conv = TorchConvolver(b_host, dtype=torch.complex64)
     # (result_torch, fft_torch, runtime) = torch_conv.run(a_host)
