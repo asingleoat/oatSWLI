@@ -15,46 +15,72 @@ def unwrap_shift(i, N):
     """Unwrap circular index i to signed shift in range [-N/2, N/2)"""
     return i if i < N // 2 else i - N
 
-
-def benchmark_cpu_multi_threaded(a_host, b_host):
-    N = len(a_host)
+def benchmark_cpu_multi_threaded(b_host, a_host, max_dev=1.0):
+    # Pre-compute reference FFT (conjugated for cross-correlation)
     reference = np.conj(np.fft.rfft(b_host.astype(np.float32), axis=-1))
-
-    # TODO: may want to limit num_cores to control memory pressure
+    N = a_host.shape[-1]  # Length of sequences
+    
     num_cores = os.cpu_count()
     
-    chunk_size = a_host.shape[0] // num_cores
+    # Create chunks for 2D processing (flatten first two dimensions)
+    original_shape = a_host.shape[:2]  # Store original 2D shape
+    a_flat = a_host.reshape(-1, a_host.shape[-1])  # Flatten to (total_sequences, sequence_length)
+    
+    chunk_size = a_flat.shape[0] // num_cores
     chunks = []
     
     for i in range(num_cores):
         start_idx = i * chunk_size
-        if i == num_cores - 1:  # last chunk gets remainder of values
-            end_idx = a_host.shape[0]
+        if i == num_cores - 1:  # Last chunk gets remainder
+            end_idx = a_flat.shape[0]
         else:
             end_idx = (i + 1) * chunk_size
         chunks.append((start_idx, end_idx))
     
-    # pre-allocate output arrays
-    rfft_shape = list(a_host.shape)
-    # note shape for rfft which exploits hermitian symmetry
-    rfft_shape[-1] = a_host.shape[-1] // 2 + 1
-    
-    # final result is real
-    result = np.empty(a_host.shape, dtype=np.float32)
-    # intermediate frequency domain result is complex for phase retrieval
-    fc = np.empty(rfft_shape, dtype=np.complex64)
+    # Pre-allocate output array for alignment offsets
+    offsets = np.empty(a_flat.shape[0], dtype=np.float32)
     
     def process_chunk(start_idx, end_idx):
-        a_chunk = a_host[start_idx:end_idx]
-        
-        fa_chunk = np.fft.rfft(a_chunk, axis=-1)
-        
-        fc_chunk = fa_chunk * fb_vector
-        
-        fc[start_idx:end_idx] = fc_chunk
-        result[start_idx:end_idx] = np.fft.irfft(fc_chunk, n=a_host.shape[-1], axis=-1).astype(np.float32)
-        
-        return None
+        for seq_idx in range(start_idx, end_idx):
+            a_seq = a_flat[seq_idx]
+            
+            # Compute cross-spectrum
+            A = np.fft.rfft(a_seq.astype(np.float32))
+            cross_spec = A * reference
+            
+            # Step 1: Get coarse integer shift via cross-correlation
+            corr = np.fft.irfft(cross_spec, n=N)
+            peak = np.argmax(np.abs(corr))
+            shift_int = unwrap_shift(peak, N)
+            
+            # Step 2: Refine with phase slope analysis
+            freqs = np.fft.rfftfreq(N)
+            valid = freqs > 0
+            f = freqs[valid]
+            cross_spec_valid = cross_spec[valid]
+            
+            if len(f) < 3:
+                offsets[seq_idx] = float(shift_int)
+                continue
+                
+            # Subtract expected phase from integer shift
+            phase = np.unwrap(np.angle(cross_spec_valid))
+            expected_phase = -2 * np.pi * f * shift_int
+            residual_phase = (phase - expected_phase + np.pi) % (2 * np.pi) - np.pi
+            
+            # Estimate residual delay per bin
+            delta = -residual_phase / (2 * np.pi * f)
+            
+            # Mask plausible bins and compute weighted average
+            mag = np.abs(cross_spec_valid)
+            mag /= mag.max() + 1e-12
+            mask = np.abs(delta) <= max_dev
+            
+            if np.sum(mask) < 3:
+                offsets[seq_idx] = float(shift_int)  # Fallback
+            else:
+                delta_refined = np.sum(mag[mask] * delta[mask]) / np.sum(mag[mask])
+                offsets[seq_idx] = -(shift_int + delta_refined)
     
     start = time.time()
     
@@ -67,7 +93,11 @@ def benchmark_cpu_multi_threaded(a_host, b_host):
     
     end = time.time()
     duration = end - start
-    return result, fc, duration
+    
+    # Reshape offsets back to original 2D shape
+    offsets_2d = offsets.reshape(original_shape)
+    
+    return -offsets_2d, duration
 
 
 def local_residual_phase_delay(a, b, max_dev=1.0):
@@ -197,6 +227,31 @@ def gaussian_cosine(length=256, offset=0, width=10, freq=0.01):
     carrier = np.cos(2 * np.pi * freq * (x - center))
     return gauss * carrier
 
+def gaussian_cosine_batch(batch_shape, length=256, width=10, freq=0.01, offsets=None, snr=60):
+    """
+    Generate a [B, C, N] batch of Gaussian-modulated cosines.
+    - offsets: either scalar, list of length B, or [B, C] array of offsets
+    """
+    if offsets is None:
+        offsets = np.zeros(batch_shape)
+    else:
+        offsets = np.asarray(offsets)
+        if offsets.ndim == 0:
+            offsets = np.full(batch_shape, offsets)
+
+    x = np.arange(length)
+    pulses = np.empty((*batch_shape, length), dtype=np.float32)
+
+    for b in range(batch_shape[0]):
+        for c in range(batch_shape[1]):
+            center = length // 2 + offsets[b, c]
+            gauss = np.exp(-0.5 * ((x - center) / width) ** 2)
+            carrier = np.cos(2 * np.pi * freq * (x - center))
+            pulses[b, c, :] = add_noise(gauss * carrier, snr)
+
+    return pulses
+
+
 # Test signal: sinc pulse
 N = 800
 x = np.arange(N)
@@ -206,10 +261,12 @@ shift_amt = 10.7  # fractional offset
 shifted = gaussian_cosine(length=N, width=width, offset=shift_amt)
 ref = gaussian_cosine(length=N, width=width, offset=0)
 
+snr = 40
+shifted_batch = gaussian_cosine_batch((1920,1080), length=N, width=width, offsets=shift_amt, snr=snr)
+
 # shifted = sinc_pulse(length=N, width=width, offset=shift_amt)
 # ref = sinc_pulse(length=N, width=width, offset=0)
 
-snr = 26
 def run_shift_trials(ref, shifted, estimate_fn, snr_db, n_trials=100):
     errors = []
     estimates = []
@@ -232,8 +289,34 @@ def run_shift_trials(ref, shifted, estimate_fn, snr_db, n_trials=100):
     print(f"Std dev of error: {np.std(errors):.4f}")
     print(f"Min/Max estimate: {np.min(estimates):.4f} / {np.max(estimates):.4f}")
 
-run_shift_trials(ref, shifted, local_residual_phase_delay, snr_db=snr, n_trials=100)
+def run_shift_trials_3d(ref, shifted, estimate_fn, snr_db, n_trials=100):
+    errors = []
+    estimates = []
+    times = []
 
+    for _ in range(n_trials):
+        noisy_ref = add_noise(ref, snr_db)
+        est, duration = estimate_fn(noisy_ref, shifted)
+        estimates.append(est)
+        times.append(duration)
+        errors.append(abs(est - shift_amt))
+
+    estimates = np.array(estimates)
+    errors = np.array(errors)
+    times = np.array(times)
+    print(f"True shift: {shift_amt:.4f}")
+    print(f"Mean estimate: {np.mean(estimates):.4f}")
+    print(f"Mean error: {np.mean(errors):.4f}")
+    print(f"Std dev of error: {np.std(errors):.4f}")
+    print(f"Min/Max estimate: {np.min(estimates):.4f} / {np.max(estimates):.4f}")
+    print(f"Mean runtime: {np.mean(times):.4f}")
+
+    
+run_shift_trials(ref, shifted, local_residual_phase_delay, snr_db=snr, n_trials=100)
+run_shift_trials_3d(ref, shifted_batch, benchmark_cpu_multi_threaded, snr_db=snr, n_trials=1)
+
+
+# print(benchmark_cpu_multi_threaded(shifted[np.newaxis, np.newaxis, :], ref))
 # # Plot phase
 # plt.plot(freqs, raw_phase, label='raw phase')
 # plt.plot(freqs, unwrapped_phase, label='unwrapped phase')

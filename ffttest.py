@@ -1,3 +1,4 @@
+import matplotlib.pyplot as plt
 import numpy as np
 import time
 import threading
@@ -8,10 +9,12 @@ shape = (1920, 1080, 60*1)
 
 # Data to convolve
 np.random.seed(1)
-a_host = np.random.rand(*shape).astype(np.complex64)
-b_host = np.random.rand(*shape).astype(np.complex64)
-b_host_vec = np.random.rand(shape[2]).astype(np.complex64)
-fb_vector = np.fft.fft(b_host_vec, axis=-1)
+a_host = np.random.rand(*shape).astype(np.float32)  # Changed from complex64 to float32
+b_host_vec = np.random.rand(shape[2]).astype(np.float32)  # Changed from complex64 to float32
+fb_vector = np.fft.fft(b_host_vec.astype(np.complex64), axis=-1)  # Convert to complex for FFT
+real_fb_vector = np.fft.rfft(b_host_vec.astype(np.float32), axis=-1)  # Convert to complex for FFT
+
+
 
 # -------------------- CUDA --------------------
 from pycuda.elementwise import ElementwiseKernel
@@ -178,6 +181,7 @@ def benchmark_torch(a_host, b_host):
 
 def benchmark_cpu_single_threaded(a_host, b_host):
     fb = b_host # np.fft.fft(b_host, axis=-1)  # this one can be precomputed
+    fb = np.conj(fb)
 
     start = time.time()
     fa = np.fft.fft(a_host, axis=-1)
@@ -188,6 +192,10 @@ def benchmark_cpu_single_threaded(a_host, b_host):
     return result, fc, duration
 
 def benchmark_cpu_multi_threaded(a_host, b_host):
+    fb_vector = np.fft.rfft(b_host.astype(np.float32), axis=-1)
+    fb_vector = np.conj(fb_vector)
+
+    # TODO: may want to limit num_cores to control memory pressure
     num_cores = os.cpu_count()
     
     chunk_size = a_host.shape[0] // num_cores
@@ -195,19 +203,33 @@ def benchmark_cpu_multi_threaded(a_host, b_host):
     
     for i in range(num_cores):
         start_idx = i * chunk_size
-        if i == num_cores - 1:  # Last chunk gets remainder
+        if i == num_cores - 1:  # last chunk gets remainder of values
             end_idx = a_host.shape[0]
         else:
             end_idx = (i + 1) * chunk_size
         chunks.append((start_idx, end_idx))
     
+    # pre-allocate output arrays
+    rfft_shape = list(a_host.shape)
+    # note shape for rfft which exploits hermitian symmetry
+    rfft_shape[-1] = a_host.shape[-1] // 2 + 1
+    
+    # final result is real
+    result = np.empty(a_host.shape, dtype=np.float32)
+    # intermediate frequency domain result is complex for phase retrieval
+    fc = np.empty(rfft_shape, dtype=np.complex64)
+    
     def process_chunk(start_idx, end_idx):
         a_chunk = a_host[start_idx:end_idx]
         
-        fa_chunk = np.fft.fft(a_chunk, axis=-1)
+        fa_chunk = np.fft.rfft(a_chunk, axis=-1)
+        
         fc_chunk = fa_chunk * fb_vector
-        result_chunk = np.fft.ifft(fc_chunk, axis=-1).real
-        return result_chunk, fc_chunk
+        
+        fc[start_idx:end_idx] = fc_chunk
+        result[start_idx:end_idx] = np.fft.irfft(fc_chunk, n=a_host.shape[-1], axis=-1).astype(np.float32)
+        
+        return None
     
     start = time.time()
     
@@ -215,38 +237,76 @@ def benchmark_cpu_multi_threaded(a_host, b_host):
         futures = [executor.submit(process_chunk, start_idx, end_idx) 
                   for start_idx, end_idx in chunks]
         
-        chunk_results = []
-        chunk_ffts = []
         for future in futures:
-            result_chunk, fc_chunk = future.result()
-            chunk_results.append(result_chunk)
-            chunk_ffts.append(fc_chunk)
-    
-    # PARALLELISM OPPORTUNITY: Could pre-allocate output arrays and write chunks directly
-    # to avoid concatenation step entirely
-    result = np.concatenate(chunk_results, axis=0)
-    fc = np.concatenate(chunk_ffts, axis=0)
+            future.result()
     
     end = time.time()
     duration = end - start
     return result, fc, duration
 
+def sinc_pulse(length=256, width=10, offset=0):
+    x = np.arange(length)
+    center = length // 2 + offset
+    return np.sinc((x - center) / width)
 
+# Parameters
+length = 2560
+width = 10
+offset = -50.4  # integer sample offset
 
-if __name__ == "__main__":
+ref = sinc_pulse(length=length, width=width, offset=0)
+shifted = sinc_pulse(length=length, width=width, offset=offset)
+shifted_3d = shifted[np.newaxis, np.newaxis, :]
+
+def normalize(x):
+    max_abs = np.max(np.abs(x))
+    if max_abs == 0:
+        return x  # avoid divide-by-zero
+    return x / max_abs
+
+def main():
     # (result_torch, fft_result, runtime) = benchmark_torch(a_host, b_host)
     # print(f"PyTorch convolution: {runtime:.4f}s")
     # print(f"Torch checksum: {np.sum(np.abs(result_torch))}\n")
 
-    (result_cpu, fft_cpu, runtime) = benchmark_cpu_single_threaded(a_host, fb_vector)
+    # (result_cpu, fft_cpu, runtime) = benchmark_cpu_single_threaded(a_host, fb_vector)
+    # print(f"CPU convolution: {runtime:.4f}s")
+    # print(f"CPU checksum: {np.sum(np.abs(result_cpu))}")
+    # print(f"CPU fft checksum: {np.sum(np.abs(fft_cpu))}\n")
+
+    (result_cpu, fft_cpu, runtime) = benchmark_cpu_multi_threaded(shifted_3d, ref)
     print(f"CPU convolution: {runtime:.4f}s")
     print(f"CPU checksum: {np.sum(np.abs(result_cpu))}")
     print(f"CPU fft checksum: {np.sum(np.abs(fft_cpu))}\n")
 
-    (result_cpu, fft_cpu, runtime) = benchmark_cpu_multi_threaded(a_host, fb_vector)
-    print(f"CPU convolution: {runtime:.4f}s")
-    print(f"CPU checksum: {np.sum(np.abs(result_cpu))}")
-    print(f"CPU fft checksum: {np.sum(np.abs(fft_cpu))}\n")
+    N = len(result_cpu[0,0,:])
+    phase_diff = np.angle(fft_cpu[0,0,:])
+    phase_diff_unwrapped = np.unwrap(phase_diff)
+    k = np.fft.rfftfreq(N)
+
+    mag = np.abs(fft_cpu[0,0,:])
+    weight = mag / (mag.max() + 1e-12)
+
+    x = k
+    y = phase_diff_unwrapped
+    w = weight
+
+    # slope = sum(w x y) / sum(w x²)
+    slope = np.sum(w * x * y) / np.sum(w * x**2)
+    shift = slope / (2 * np.pi)  # in samples
+    print(shift)
+    
+    # Optional plot for sanity check
+    plt.plot(ref, label="reference")
+    plt.plot(shifted, label=f"offset={offset}")
+    plt.plot(normalize(result_cpu[0,0,:]), label=f"result")
+    plt.plot(normalize(fft_cpu.real[0,0,:]), label=f"real fft")
+    plt.plot(normalize(fft_cpu.imag[0,0,:]), label=f"imag fft")
+    plt.plot(phase_diff_unwrapped, label=f"angle")
+    plt.legend()
+    plt.title("Sinc-like test pulses")
+    # plt.show()
+
 
     
     # print("Context reuse benchmarks:")
@@ -274,3 +334,6 @@ if __name__ == "__main__":
     # print(f"Warm TORCH convolution: {runtime*1000:.4f}ms")
     # print(f"TORCH checksum: {np.sum(np.abs(result_torch))}")
     # print(f"TORCH fft checksum: {np.sum(np.abs(fft_torch))}\n")
+
+if __name__ == "__main__":
+    main()
