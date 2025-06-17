@@ -1,9 +1,74 @@
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
+import os
+
+def normalize(x):
+    max_abs = np.max(np.abs(x))
+    if max_abs == 0:
+        return x  # avoid divide-by-zero
+    return x / max_abs
 
 def unwrap_shift(i, N):
     """Unwrap circular index i to signed shift in range [-N/2, N/2)"""
     return i if i < N // 2 else i - N
+
+
+def benchmark_cpu_multi_threaded(a_host, b_host):
+    N = len(a_host)
+    reference = np.conj(np.fft.rfft(b_host.astype(np.float32), axis=-1))
+
+    # TODO: may want to limit num_cores to control memory pressure
+    num_cores = os.cpu_count()
+    
+    chunk_size = a_host.shape[0] // num_cores
+    chunks = []
+    
+    for i in range(num_cores):
+        start_idx = i * chunk_size
+        if i == num_cores - 1:  # last chunk gets remainder of values
+            end_idx = a_host.shape[0]
+        else:
+            end_idx = (i + 1) * chunk_size
+        chunks.append((start_idx, end_idx))
+    
+    # pre-allocate output arrays
+    rfft_shape = list(a_host.shape)
+    # note shape for rfft which exploits hermitian symmetry
+    rfft_shape[-1] = a_host.shape[-1] // 2 + 1
+    
+    # final result is real
+    result = np.empty(a_host.shape, dtype=np.float32)
+    # intermediate frequency domain result is complex for phase retrieval
+    fc = np.empty(rfft_shape, dtype=np.complex64)
+    
+    def process_chunk(start_idx, end_idx):
+        a_chunk = a_host[start_idx:end_idx]
+        
+        fa_chunk = np.fft.rfft(a_chunk, axis=-1)
+        
+        fc_chunk = fa_chunk * fb_vector
+        
+        fc[start_idx:end_idx] = fc_chunk
+        result[start_idx:end_idx] = np.fft.irfft(fc_chunk, n=a_host.shape[-1], axis=-1).astype(np.float32)
+        
+        return None
+    
+    start = time.time()
+    
+    with ThreadPoolExecutor(max_workers=num_cores) as executor:
+        futures = [executor.submit(process_chunk, start_idx, end_idx) 
+                  for start_idx, end_idx in chunks]
+        
+        for future in futures:
+            future.result()
+    
+    end = time.time()
+    duration = end - start
+    return result, fc, duration
+
 
 def local_residual_phase_delay(a, b, max_dev=1.0):
     N = len(a)
@@ -135,8 +200,8 @@ def gaussian_cosine(length=256, offset=0, width=10, freq=0.01):
 # Test signal: sinc pulse
 N = 800
 x = np.arange(N)
-width = 100
-shift_amt = 10.5  # fractional offset
+width = 50
+shift_amt = 10.7  # fractional offset
 
 shifted = gaussian_cosine(length=N, width=width, offset=shift_amt)
 ref = gaussian_cosine(length=N, width=width, offset=0)
@@ -179,5 +244,5 @@ plt.ylabel("phase difference (radians)")
 plt.title("Phase difference vs frequency")
 plt.legend()
 plt.grid(True)
-plt.show()
+# plt.show()
 
