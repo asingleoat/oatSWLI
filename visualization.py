@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 import numpy as np
 import torch
-
+import time
 
 def create_3d_surface_plot(heightmap, title="Heightmap"):
     """
@@ -17,12 +17,18 @@ def create_3d_surface_plot(heightmap, title="Heightmap"):
     Returns:
         Plotly figure object
     """
+    y_len, x_len = heightmap.shape
+    scale = max(y_len,x_len)
+    aspect_x = x_len/scale
+    aspect_y = y_len/scale
+    aspect_z = 0.2 * max(aspect_x, aspect_y)
+
     fig = go.Figure(data=[go.Surface(z=heightmap, colorscale="earth")])
     fig.update_layout(
         title=dict(text=title),
         autosize=True,
         margin=dict(l=65, r=50, b=65, t=90),
-        scene={"aspectratio": {"x": 1, "y": 1, "z": 0.2}},
+        scene={"aspectratio": {"x": aspect_x, "y": aspect_y, "z": aspect_z}},
     )
     return fig
 
@@ -121,3 +127,37 @@ def setup_interactive_plots(metadata, ift_result, reference_chirp, crop_region):
     plt.legend()
 
     return (fig, ax), (fig_sequence, ax_sequence)
+
+def plot_lines(corr_list, labels=None, prev_shift=None, new_shift=None):
+    """
+    Plot multiple cross-correlation spectra on the same plot.
+
+    Args:
+        corr_list: list of 1D arrays, each a correlation spectrum
+        labels: optional list of labels for each array
+        prev_shift: optional float, draw a line at prior shift
+    """
+    N = len(corr_list[0])
+    x = np.arange(N)
+
+    plt.figure(figsize=(10, 4))
+    
+    for idx, corr in enumerate(corr_list):
+        label = labels[idx] if labels is not None else f"corr {idx}"
+        jitter = np.random.normal(scale=0.03, size=1)
+        
+        plt.plot(x, normalize_max_abs(corr)+jitter, label=label)
+
+    if prev_shift is not None:
+        plt.axvline(prev_shift, color='r', linestyle='--', label='Prev shift')
+    if prev_shift is not None:
+        plt.axvline(new_shift, color='b', linestyle='--', label='New shift')
+    
+    plt.xlabel("Lag")
+    plt.ylabel("Correlation")
+    plt.title("Cross-correlation spectra")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig("/tmp/plot.png")
+    # plt.show()
