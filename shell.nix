@@ -102,7 +102,8 @@ in pkgs.mkShell {
     glfw
     vkfft
     (python312Packages.python.withPackages (ps: with ps; [
-      ffmpeg
+      # ffmpeg
+      ffmpeg-python
       matplotlib
       numpy
       opencv4

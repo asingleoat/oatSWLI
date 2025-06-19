@@ -1,8 +1,11 @@
+#!/usr/bin/env python3
+
 import matplotlib.pyplot as plt
 import numpy as np
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 import os
 
 def normalize(x):
@@ -11,17 +14,21 @@ def normalize(x):
         return x  # avoid divide-by-zero
     return x / max_abs
 
-def unwrap_shift(i, N):
-    """Unwrap circular index i to signed shift in range [-N/2, N/2)"""
-    return i if i < N // 2 else i - N
+# def unwrap_shift(i, N):
+    # return i if i < N // 2 else i - N
 
-def benchmark_cpu_multi_threaded(b_host, a_host, max_dev=1.0):
+def unwrap_shift(i, N):
+    # """Unwrap circular index i to signed shift in range [-N/2, N/2)"""
+    return np.where(i < N // 2, i, i - N)
+
+
+def align_multi(b_host, a_host, max_dev=1.0):
     # Pre-compute reference FFT (conjugated for cross-correlation)
     reference = np.conj(np.fft.rfft(b_host.astype(np.float32), axis=-1))
     N = a_host.shape[-1]  # Length of sequences
     
     num_cores = os.cpu_count()
-    
+    print("Num cores: ", num_cores)
     # Create chunks for 2D processing (flatten first two dimensions)
     original_shape = a_host.shape[:2]  # Store original 2D shape
     a_flat = a_host.reshape(-1, a_host.shape[-1])  # Flatten to (total_sequences, sequence_length)
@@ -81,23 +88,141 @@ def benchmark_cpu_multi_threaded(b_host, a_host, max_dev=1.0):
             else:
                 delta_refined = np.sum(mag[mask] * delta[mask]) / np.sum(mag[mask])
                 offsets[seq_idx] = -(shift_int + delta_refined)
+
+    # with ProcessPoolExecutor(max_workers=num_cores) as executor:
+    #     futures = [
+    #         executor.submit(
+    #             process_chunk_top_level
+    #             start_idx,
+    #             end_idx,
+    #             a_flat,
+    #             reference,
+    #             N,
+    #             max_dev,
+    #             offsets,
+    #         )
+    #         for start_idx, end_idx in chunks
+    #     ]
+    # for future in futures:
+    #     future.result()
     
-    start = time.time()
-    
+    # with ProcessPoolExecutor(max_workers=num_cores) as executor:
+    #     futures = [executor.submit(process_chunk, start_idx, end_idx)
+    #               for start_idx, end_idx in chunks]
+    #     for future in futures:
+    #         future.result()    
     with ThreadPoolExecutor(max_workers=num_cores) as executor:
         futures = [executor.submit(process_chunk, start_idx, end_idx) 
                   for start_idx, end_idx in chunks]
         
         for future in futures:
             future.result()
-    
-    end = time.time()
-    duration = end - start
-    
+        
     # Reshape offsets back to original 2D shape
     offsets_2d = offsets.reshape(original_shape)
     
-    return -offsets_2d, duration
+    return offsets_2d
+
+def align_multi_p(b_host, a_host, max_dev=1.0, band=(0.05, 0.4)):
+    reference = np.conj(np.fft.rfft(b_host.astype(np.float32), axis=-1))
+    N = a_host.shape[-1]
+    num_cores = os.cpu_count()
+    global_fallback_count = 0
+    tweaks = 0
+    counter = 0
+    
+    original_shape = a_host.shape[:2]
+    a_flat = a_host.reshape(-1, a_host.shape[-1])
+    total_seqs = a_flat.shape[0]
+
+    chunk_size = total_seqs // num_cores
+    chunks = []
+    for i in range(num_cores):
+        start = i * chunk_size
+        end = total_seqs if i == num_cores - 1 else (i + 1) * chunk_size
+        chunks.append((start, a_flat[start:end]))
+
+    offsets = np.empty(total_seqs, dtype=np.float32)
+
+    with ProcessPoolExecutor(max_workers=num_cores) as executor:
+        futures = [
+            executor.submit(process_chunk_top_level, chunk_data, reference, N, max_dev, start, band)
+            for (start, chunk_data) in chunks
+        ]
+        for fut in futures:
+            start_idx, chunk_result, fallback_count, avg_tweak = fut.result()
+            offsets[start_idx:start_idx + len(chunk_result)] = chunk_result
+            global_fallback_count += fallback_count
+            counter +=1
+            tweaks += avg_tweak
+    print("Avg Phase Refinement: ", tweaks/counter)
+    print("Fallbacks: ", global_fallback_count)
+    print("Fallback proportion: ", global_fallback_count/(original_shape[0]*original_shape[1]))
+    return offsets.reshape(original_shape)
+
+def process_chunk_top_level(chunk_data, reference, N, max_dev, start_idx, band=(0.05, 0.4)):
+    local_offsets = np.empty(chunk_data.shape[0], dtype=np.float32)
+    fallback_count = 0
+    tweaks = 0
+    pixels = 0
+    prev_shift = None
+    
+    for i in range(chunk_data.shape[0]):
+        a_seq = chunk_data[i]
+        A = np.fft.rfft(a_seq.astype(np.float32))
+        cross_spec = A * reference
+
+        freqs = np.fft.rfftfreq(N)
+        band_mask = (freqs >= band[0]) & (freqs <= band[1])
+        cross_spec_band = np.zeros_like(cross_spec)
+        cross_spec_band[band_mask] = cross_spec[band_mask]
+        
+        corr = np.fft.irfft(cross_spec_band, n=N)
+        if prev_shift is None:
+            peak = np.argmax(np.abs(corr))
+        else:
+            peak = argmax_with_prior(corr, prev_shift, sigma=200)
+        shift_int = unwrap_shift(peak, N)
+
+        valid = freqs > 1e-6 # exclude very low frequencies or DC
+        f = freqs[valid]
+        cross_spec_valid = cross_spec[valid]
+
+
+        phase = np.unwrap(np.angle(cross_spec_valid))
+        expected_phase = -2 * np.pi * f * shift_int
+        residual_phase = (phase - expected_phase + np.pi) % (2 * np.pi) - np.pi
+        delta = -residual_phase / (2 * np.pi * f)
+
+        mag = np.abs(cross_spec_valid)
+        mag /= mag.max() + 1e-12
+        mask = np.abs(delta) <= max_dev
+
+        if np.sum(mask) < 3:
+            local_offsets[i] = float(shift_int)
+            fallback_count += 1            
+        else:
+            delta_refined = np.sum(mag[mask] * delta[mask]) / np.sum(mag[mask])
+            local_offsets[i] = -(shift_int + delta_refined)
+            tweaks += np.abs(delta_refined)
+            pixels += 1
+        prev_shift = local_offsets[i]
+        
+    return (start_idx, local_offsets, fallback_count, tweaks/pixels)
+
+def argmax_with_prior(corr, prev_shift, sigma=1.5):
+    """
+    Prior-weighted argmax of cross-correlation using Gaussian prior.
+    prev_shift: previous integer shift (unwrapped)
+    sigma: stddev of the Gaussian prior in samples
+    """
+    N = len(corr)
+    indices = np.arange(N)
+    prior = np.exp(-0.5 * ((unwrap_shift(indices, N) - prev_shift) / sigma) ** 2)
+    prior /= prior.max()  # normalize for stability
+
+    score = np.abs(corr) * prior
+    return np.argmax(score)
 
 
 def local_residual_phase_delay(a, b, max_dev=1.0):
@@ -252,22 +377,10 @@ def gaussian_cosine_batch(batch_shape, length=256, width=10, freq=0.01, offsets=
     return pulses
 
 
-# Test signal: sinc pulse
-N = 800
-x = np.arange(N)
-width = 50
-shift_amt = 10.7  # fractional offset
-
-shifted = gaussian_cosine(length=N, width=width, offset=shift_amt)
-ref = gaussian_cosine(length=N, width=width, offset=0)
-
-snr = 40
-shifted_batch = gaussian_cosine_batch((1920,1080), length=N, width=width, offsets=shift_amt, snr=snr)
-
 # shifted = sinc_pulse(length=N, width=width, offset=shift_amt)
 # ref = sinc_pulse(length=N, width=width, offset=0)
 
-def run_shift_trials(ref, shifted, estimate_fn, snr_db, n_trials=100):
+def run_shift_trials(ref, shifted, estimate_fn, snr_db, shift_amt, n_trials=100):
     errors = []
     estimates = []
 
@@ -289,7 +402,7 @@ def run_shift_trials(ref, shifted, estimate_fn, snr_db, n_trials=100):
     print(f"Std dev of error: {np.std(errors):.4f}")
     print(f"Min/Max estimate: {np.min(estimates):.4f} / {np.max(estimates):.4f}")
 
-def run_shift_trials_3d(ref, shifted, estimate_fn, snr_db, n_trials=100):
+def run_shift_trials_3d(ref, shifted, estimate_fn, snr_db, shift_amt, n_trials=100):
     errors = []
     estimates = []
     times = []
@@ -311,21 +424,38 @@ def run_shift_trials_3d(ref, shifted, estimate_fn, snr_db, n_trials=100):
     print(f"Min/Max estimate: {np.min(estimates):.4f} / {np.max(estimates):.4f}")
     print(f"Mean runtime: {np.mean(times):.4f}")
 
+def main():    
+    # Test signal: sinc pulse
+    N = 800
+    x = np.arange(N)
+    width = 50
+    shift_amt = 10.7  # fractional offset
     
-run_shift_trials(ref, shifted, local_residual_phase_delay, snr_db=snr, n_trials=100)
-run_shift_trials_3d(ref, shifted_batch, benchmark_cpu_multi_threaded, snr_db=snr, n_trials=1)
+    shifted = gaussian_cosine(length=N, width=width, offset=shift_amt)
+    ref = gaussian_cosine(length=N, width=width, offset=0)
+
+    snr = 40
+    shifted_batch = gaussian_cosine_batch((192,108), length=N, width=width, offsets=shift_amt, snr=snr)
+
+    print(shifted_batch.shape)
+    print(ref.shape)
+
+    run_shift_trials(ref, shifted, local_residual_phase_delay, snr_db=snr, shift_amt=shift_amt, n_trials=100)
+    run_shift_trials_3d(ref, shifted_batch, align_multi, snr_db=snr, shift_amt=shift_amt, n_trials=1)
 
 
-# print(benchmark_cpu_multi_threaded(shifted[np.newaxis, np.newaxis, :], ref))
-# # Plot phase
-# plt.plot(freqs, raw_phase, label='raw phase')
-# plt.plot(freqs, unwrapped_phase, label='unwrapped phase')
-plt.plot(add_noise(shifted, snr), label='noise')
-plt.plot(add_noise(ref, snr), label='noise')
-plt.xlabel("frequency (cycles/sample)")
-plt.ylabel("phase difference (radians)")
-plt.title("Phase difference vs frequency")
-plt.legend()
-plt.grid(True)
-# plt.show()
+    # print(benchmark_cpu_multi_threaded(shifted[np.newaxis, np.newaxis, :], ref))
+    # # Plot phase
+    # plt.plot(freqs, raw_phase, label='raw phase')
+    # plt.plot(freqs, unwrapped_phase, label='unwrapped phase')
+    plt.plot(add_noise(shifted, snr), label='noise')
+    plt.plot(add_noise(ref, snr), label='noise')
+    plt.xlabel("frequency (cycles/sample)")
+    plt.ylabel("phase difference (radians)")
+    plt.title("Phase difference vs frequency")
+    plt.legend()
+    plt.grid(True)
+    # plt.show()
 
+if __name__ == "__main__":
+    main()
