@@ -7,6 +7,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import ProcessPoolExecutor
 import os
+from visualization import create_3d_surface_plot, setup_interactive_plots, plot_lines
 
 def normalize(x):
     max_abs = np.max(np.abs(x))
@@ -14,13 +15,19 @@ def normalize(x):
         return x  # avoid divide-by-zero
     return x / max_abs
 
-# def unwrap_shift(i, N):
-    # return i if i < N // 2 else i - N
-
 def unwrap_shift(i, N):
-    # """Unwrap circular index i to signed shift in range [-N/2, N/2)"""
+    """Unwrap circular index i to signed shift in range [-N/2, N/2)"""
     return np.where(i < N // 2, i, i - N)
 
+def average_if_defined(x, y):
+    if x is not None and y is not None:
+        return 0.5 * (x + y)
+    elif x is not None:
+        return x
+    elif y is not None:
+        return y
+    else:
+        return None
 
 def align_multi(b_host, a_host, max_dev=1.0):
     # Pre-compute reference FFT (conjugated for cross-correlation)
@@ -89,28 +96,6 @@ def align_multi(b_host, a_host, max_dev=1.0):
                 delta_refined = np.sum(mag[mask] * delta[mask]) / np.sum(mag[mask])
                 offsets[seq_idx] = -(shift_int + delta_refined)
 
-    # with ProcessPoolExecutor(max_workers=num_cores) as executor:
-    #     futures = [
-    #         executor.submit(
-    #             process_chunk_top_level
-    #             start_idx,
-    #             end_idx,
-    #             a_flat,
-    #             reference,
-    #             N,
-    #             max_dev,
-    #             offsets,
-    #         )
-    #         for start_idx, end_idx in chunks
-    #     ]
-    # for future in futures:
-    #     future.result()
-    
-    # with ProcessPoolExecutor(max_workers=num_cores) as executor:
-    #     futures = [executor.submit(process_chunk, start_idx, end_idx)
-    #               for start_idx, end_idx in chunks]
-    #     for future in futures:
-    #         future.result()    
     with ThreadPoolExecutor(max_workers=num_cores) as executor:
         futures = [executor.submit(process_chunk, start_idx, end_idx) 
                   for start_idx, end_idx in chunks]
@@ -123,92 +108,117 @@ def align_multi(b_host, a_host, max_dev=1.0):
     
     return offsets_2d
 
-def align_multi_p(b_host, a_host, max_dev=1.0, band=(0.05, 0.4)):
+def align_multi_p(b_host, a_host, max_dev=1.0, band=(0.05, 0.4), tile_size=(400, 400)):
     reference = np.conj(np.fft.rfft(b_host.astype(np.float32), axis=-1))
     N = a_host.shape[-1]
+    H, W = a_host.shape[:2]
     num_cores = os.cpu_count()
+
+    # Create tile coordinates
+    tile_coords = []
+    for i in range(0, H, tile_size[0]):
+        for j in range(0, W, tile_size[1]):
+            tile_coords.append((i, j))
+
+    offsets = np.empty((H, W), dtype=np.float32)
     global_fallback_count = 0
     tweaks = 0
     counter = 0
-    
-    original_shape = a_host.shape[:2]
-    a_flat = a_host.reshape(-1, a_host.shape[-1])
-    total_seqs = a_flat.shape[0]
-
-    chunk_size = total_seqs // num_cores
-    chunks = []
-    for i in range(num_cores):
-        start = i * chunk_size
-        end = total_seqs if i == num_cores - 1 else (i + 1) * chunk_size
-        chunks.append((start, a_flat[start:end]))
-
-    offsets = np.empty(total_seqs, dtype=np.float32)
 
     with ProcessPoolExecutor(max_workers=num_cores) as executor:
         futures = [
-            executor.submit(process_chunk_top_level, chunk_data, reference, N, max_dev, start, band)
-            for (start, chunk_data) in chunks
+            executor.submit(
+                process_tile,
+                a_host[i:i+tile_size[0], j:j+tile_size[1], :],
+                reference,
+                N,
+                max_dev,
+                band,
+                (i, j)
+            ) for (i, j) in tile_coords
         ]
-        for fut in futures:
-            start_idx, chunk_result, fallback_count, avg_tweak = fut.result()
-            offsets[start_idx:start_idx + len(chunk_result)] = chunk_result
-            global_fallback_count += fallback_count
-            counter +=1
-            tweaks += avg_tweak
-    print("Avg Phase Refinement: ", tweaks/counter)
-    print("Fallbacks: ", global_fallback_count)
-    print("Fallback proportion: ", global_fallback_count/(original_shape[0]*original_shape[1]))
-    return offsets.reshape(original_shape)
 
-def process_chunk_top_level(chunk_data, reference, N, max_dev, start_idx, band=(0.05, 0.4)):
-    local_offsets = np.empty(chunk_data.shape[0], dtype=np.float32)
+        for fut in futures:
+            (i, j), tile_offsets, fallback_count, avg_tweak = fut.result()
+            h, w = tile_offsets.shape
+            offsets[i:i+h, j:j+w] = tile_offsets
+            global_fallback_count += fallback_count
+            tweaks += avg_tweak
+            counter += 1
+
+    print("Avg Phase Refinement:", tweaks / counter)
+    print("Fallbacks:", global_fallback_count)
+    print("Fallback proportion:", global_fallback_count / (H * W))
+    return offsets
+
+def process_tile(tile_data, reference, N, max_dev, band, tile_origin):
+    H, W, _ = tile_data.shape
+    local_offsets = np.empty((H, W), dtype=np.float32)
     fallback_count = 0
     tweaks = 0
     pixels = 0
-    prev_shift = None
-    
-    for i in range(chunk_data.shape[0]):
-        a_seq = chunk_data[i]
-        A = np.fft.rfft(a_seq.astype(np.float32))
-        cross_spec = A * reference
+    is_primary = tile_origin == (0,0)
 
-        freqs = np.fft.rfftfreq(N)
-        band_mask = (freqs >= band[0]) & (freqs <= band[1])
-        cross_spec_band = np.zeros_like(cross_spec)
-        cross_spec_band[band_mask] = cross_spec[band_mask]
-        
-        corr = np.fft.irfft(cross_spec_band, n=N)
-        if prev_shift is None:
-            peak = np.argmax(np.abs(corr))
-        else:
-            peak = argmax_with_prior(corr, prev_shift, sigma=200)
-        shift_int = unwrap_shift(peak, N)
+    prev_shift_h = None
+    prev_shift_w = None
+    for i in range(H):
+        for j in range(W):
+            if i > 0:
+                prev_shift_h = local_offsets[i-1, j]
+            if j > 0:
+                prev_shift_w = local_offsets[i, j-1]
 
-        valid = freqs > 1e-6 # exclude very low frequencies or DC
-        f = freqs[valid]
-        cross_spec_valid = cross_spec[valid]
+            prev_shift = average_if_defined(prev_shift_h,prev_shift_w)
+            
+            a_seq = tile_data[i, j, :]
+            A = np.fft.rfft(a_seq.astype(np.float32))
+            cross_spec = A * reference
 
+            freqs = np.fft.rfftfreq(N)
+            band_mask = (freqs >= band[0]) & (freqs <= band[1])
+            cross_spec_band = np.zeros_like(cross_spec)
+            cross_spec_band[band_mask] = cross_spec[band_mask]
 
-        phase = np.unwrap(np.angle(cross_spec_valid))
-        expected_phase = -2 * np.pi * f * shift_int
-        residual_phase = (phase - expected_phase + np.pi) % (2 * np.pi) - np.pi
-        delta = -residual_phase / (2 * np.pi * f)
+            corr = np.fft.irfft(cross_spec_band, n=N)
 
-        mag = np.abs(cross_spec_valid)
-        mag /= mag.max() + 1e-12
-        mask = np.abs(delta) <= max_dev
+                
+            if prev_shift is None:
+                peak = np.argmax(corr)
+            else:
+                peak = argmax_with_prior(corr, prev_shift, sigma=50)
+            shift_int = unwrap_shift(peak, N)
+            
+            valid = freqs > 1e-6
+            f = freqs[valid]
+            cross_spec_valid = cross_spec[valid]
 
-        if np.sum(mask) < 3:
-            local_offsets[i] = float(shift_int)
-            fallback_count += 1            
-        else:
-            delta_refined = np.sum(mag[mask] * delta[mask]) / np.sum(mag[mask])
-            local_offsets[i] = -(shift_int + delta_refined)
-            tweaks += np.abs(delta_refined)
-            pixels += 1
-        prev_shift = local_offsets[i]
-        
-    return (start_idx, local_offsets, fallback_count, tweaks/pixels)
+            phase = np.unwrap(np.angle(cross_spec_valid))
+            expected_phase = -2 * np.pi * f * shift_int
+            residual_phase = (phase - expected_phase + np.pi) % (2 * np.pi) - np.pi
+            delta = -residual_phase / (2 * np.pi * f)
+
+            mag = np.abs(cross_spec_valid)
+            mag /= mag.max() + 1e-12
+            mask = np.abs(delta) <= max_dev
+
+            if np.sum(mask) < 3:
+                local_offsets[i, j] = float(shift_int)
+                fallback_count += 1
+            else:
+                delta_refined = np.sum(mag[mask] * delta[mask]) / np.sum(mag[mask])
+                local_offsets[i, j] = -(shift_int + delta_refined)
+                tweaks += np.abs(delta_refined)
+                pixels += 1
+
+    avg_tweak = tweaks / pixels if pixels > 0 else 0
+    return tile_origin, local_offsets, fallback_count, avg_tweak
+
+def unwrap_around(i, N, center):
+    # Wrap i ∈ [0, N) to be as close as possible to center
+    unwrapped = i.copy()
+    delta = ((center - i + N//2) % N) - N//2
+    return center - delta
+
 
 def argmax_with_prior(corr, prev_shift, sigma=1.5):
     """
@@ -217,12 +227,32 @@ def argmax_with_prior(corr, prev_shift, sigma=1.5):
     sigma: stddev of the Gaussian prior in samples
     """
     N = len(corr)
-    indices = np.arange(N)
-    prior = np.exp(-0.5 * ((unwrap_shift(indices, N) - prev_shift) / sigma) ** 2)
-    prior /= prior.max()  # normalize for stability
+    indices = unwrap_around(np.arange(len(corr)),N,prev_shift)
 
-    score = np.abs(corr) * prior
-    return np.argmax(score)
+    prior = np.exp(-0.5 * ((indices - prev_shift) / 250) ** 2)
+    prior /= prior.max()  # normalize
+    prior_weight = 0.2  # Blend strength
+
+    score = (1 - prior_weight) * corr + prior_weight * corr * prior
+    # score = corr * prior
+
+    # prior = np.exp(-0.5 * ((indices - prev_shift) / sigma) ** 2)
+    # prior /= prior.max()  # normalize
+    # # prior = np.exp(-0.5 * ((unwrap_shift(indices, N) - prev_shift) / sigma) ** 2)
+    # # prior /= prior.max()  # normalize for stability
+
+
+    # prior_weight = 0.2  # Blend strength
+    # # score = (1 - prior_weight) * corr + prior_weight * corr * prior
+    # score = corr * prior
+    idx = np.argmax(score)
+    if score[idx] < 0.8 * np.max(corr):  # arbitrary threshold
+        print("breaking cycle lock")
+        idx = np.argmax(corr)
+    # else:
+        # print("cycle bias")
+    idx = unwrap_shift(idx,N)
+    return idx
 
 
 def local_residual_phase_delay(a, b, max_dev=1.0):
@@ -459,3 +489,20 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+            # if is_primary and i == 30 and j == 30:
+            #     print("prev_shift: ", prev_shift)
+            #     print("naive: ", np.argmax(corr),unwrap_shift(np.argmax(corr), N))
+            #     print("priored: ", argmax_with_prior(corr, prev_shift, sigma=50),unwrap_shift(argmax_with_prior(corr, prev_shift, sigma=50), N))
+            #     # indices = unwrap_around(np.arange(len(corr)),N,prev_shift)
+            #     # prior = np.exp(-0.5 * ((indices - prev_shift) / 250) ** 2)
+            #     # prior = np.exp(-0.5 * ((unwrap_shift(indices, N) - prev_shift) / sigma) ** 2)
+            #     # prior /= prior.max()  # normalize
+            #     # prior_weight = 0.2  # Blend strength
+            #     # score = (1 - prior_weight) * corr + prior_weight * corr * prior
+            #     # score = corr * prior
+            #     # new_shift = np.argmax(score)
+            #     # print("new shift: ", centered_mod(new_shift,N))
+            #     # print("new shift: ", new_shift-N)
+            #     # plot_lines([corr,score,prior,indices],labels=["corr","score","prior","wrapping"], prev_shift=prev_shift, new_shift=new_shift)
