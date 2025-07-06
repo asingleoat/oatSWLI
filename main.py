@@ -22,36 +22,59 @@ from image_processing import (
     # get_video_metadata,
 )
 
-from visualization import create_3d_surface_plot, setup_interactive_plots
+from visualization import (
+    create_3d_surface_plot,
+    setup_interactive_plots,
+    create_3d_surface_multi,
+)
+
+from smooth import (
+    nearest_smooth,
+)
+
+try:
+    profile
+except NameError:
+
+    def profile(func):
+        return func
 
 
+@profile
 def main():
     start_time = time.perf_counter()
 
-    parser = argparse.ArgumentParser(
-        description="SWLI video processor"
-    )
+    parser = argparse.ArgumentParser(description="SWLI video processor")
     parser.add_argument("video_file", type=str, help="Path to the video file")
     parser.add_argument(
         "--plot3d", action="store_true", help="Show interactive 3D plots"
     )
 
     args = parser.parse_args()
-    video = load_video_frames(args.video_file, gray=True);
+    video = load_video_frames(args.video_file, gray=True)
+
+    print(video.shape)
+    video = video[:, :, :, : (nearest_smooth(video.shape[-1]))]
     print(video.shape)
 
-    max_indices = remove_tilt_grayscale(align_multi_p(video[1,1,0,:], video[:,:,0,:], max_dev=400, band=(0.005, 0.25)))
+    max_indices, phases, coherence = align_multi_p(
+        video[0, 000, 0, :], video[:, :, 0, :], max_dev=50, band=(0, 1)
+    )
+    # max_indices = remove_tilt_grayscale(max_indices)
 
     # Create and display 3D visualization
     if args.plot3d:
         print("Will render")
-        fig = create_3d_surface_plot(max_indices) # test render first frame
-        fig.show()
+        # fig = create_3d_surface_plot(max_indices) # test render first frame
+        fig = create_3d_surface_multi([max_indices, phases, coherence])
+        # fig.show()
+        fig.write_html("plot.html", auto_open=False)
+
     end_time = time.perf_counter()
     print(f"Execution time: {end_time - start_time:.6f} seconds")
+    exit()
 
 
-    
 def load_video_frames(path, resize=None, limit=None, gray=False):
     """
     Load video into NumPy array.
@@ -60,33 +83,35 @@ def load_video_frames(path, resize=None, limit=None, gray=False):
     - resize: (width, height) or None
     - limit: max number of frames
     """
-    pix_fmt = 'gray' if gray else 'rgb24'
+    pix_fmt = "gray" if gray else "rgb24"
 
     probe = ffmpeg.probe(path)
-    width = int(probe['streams'][0]['width'])
-    height = int(probe['streams'][0]['height'])
+    width = int(probe["streams"][0]["width"])
+    height = int(probe["streams"][0]["height"])
     if resize:
         width, height = resize
 
     cmd = (
-        ffmpeg
-        .input(path)
-        .filter('scale', width, height) if resize else ffmpeg.input(path)
+        ffmpeg.input(path).filter("scale", width, height)
+        if resize
+        else ffmpeg.input(path)
     )
     if limit:
-        cmd = cmd.output('pipe:', format='rawvideo', pix_fmt=pix_fmt, vframes=limit)
+        cmd = cmd.output("pipe:", format="rawvideo", pix_fmt=pix_fmt, vframes=limit)
     else:
-        cmd = cmd.output('pipe:', format='rawvideo', pix_fmt=pix_fmt)
+        cmd = cmd.output("pipe:", format="rawvideo", pix_fmt=pix_fmt)
 
     out, _ = cmd.run(capture_stdout=True, capture_stderr=True)
-    num_channels = {'rgb24': 3, 'gray': 1}[pix_fmt]
+    num_channels = {"rgb24": 3, "gray": 1}[pix_fmt]
     frame_size = width * height * num_channels
     total_frames = len(out) // frame_size
-    arr = np.frombuffer(out, np.uint8).reshape((total_frames, height, width, num_channels))
+    arr = np.frombuffer(out, np.uint8).reshape(
+        (total_frames, height, width, num_channels)
+    )
     arr = np.transpose(arr, (2, 1, 3, 0))  # [T, H, W, C] → [W, H, C, T]
-    return arr.astype(np.float32) # TODO: do I need this cast?
+    # arr = arr[:, ::-1, :, :]
+    return arr.astype(np.float32)  # TODO: do I need this cast?
+
 
 if __name__ == "__main__":
     main()
-
-    

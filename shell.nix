@@ -45,25 +45,25 @@ let
     
     nativeBuildInputs = with pkgs; [
       pkg-config
-      cudatoolkit
-      cudatoolkit.lib
+      # cudatoolkit
+      # cudatoolkit.lib
       gcc12
     ];
 
     buildInputs = with pkgs; [
-      vkfft
-      cudatoolkit
-      cudatoolkit.lib
-      ocl-icd
-      opencl-headers
-      cudaPackages.cuda_cudart
-      cudaPackages.cuda_nvrtc
+      # vkfft
+      # cudatoolkit
+      # cudatoolkit.lib
+      # ocl-icd
+      # opencl-headers
+      # cudaPackages.cuda_cudart
+      # cudaPackages.cuda_nvrtc
     ];
     
     propagatedBuildInputs = with pkgs.python312Packages; [
       numpy
-      pyopencl
-      pycuda
+      # pyopencl
+      # pycuda
     ];
     
     # Set environment variables for the build
@@ -100,7 +100,7 @@ in pkgs.mkShell {
     python312
     freetype
     glfw
-    vkfft
+    # vkfft
     (python312Packages.python.withPackages (ps: with ps; [
       # ffmpeg
       ffmpeg-python
@@ -112,14 +112,16 @@ in pkgs.mkShell {
       scipy
       torch-bin
       pytest
-      pyopencl
-      pyvkfft  # Add our custom pyvkfft package
-      pycuda
+      livereload
+      # pyopencl
+      # pyvkfft  # Add our custom pyvkfft package
+      # pycuda
       siphash24
+      line-profiler
     ]))
-    cudatoolkit
-    ocl-icd
-    opencl-headers
+    # cudatoolkit
+    # ocl-icd
+    # opencl-headers
   ];
 
   shellHook = ''

@@ -5,6 +5,9 @@ import plotly.graph_objects as go
 import numpy as np
 import torch
 import time
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
 
 def create_3d_surface_plot(heightmap, title="Heightmap"):
     """
@@ -18,9 +21,9 @@ def create_3d_surface_plot(heightmap, title="Heightmap"):
         Plotly figure object
     """
     y_len, x_len = heightmap.shape
-    scale = max(y_len,x_len)
-    aspect_x = x_len/scale
-    aspect_y = y_len/scale
+    scale = max(y_len, x_len)
+    aspect_x = x_len / scale
+    aspect_y = y_len / scale
     aspect_z = 0.2 * max(aspect_x, aspect_y)
 
     fig = go.Figure(data=[go.Surface(z=heightmap, colorscale="earth")])
@@ -29,6 +32,48 @@ def create_3d_surface_plot(heightmap, title="Heightmap"):
         autosize=True,
         margin=dict(l=65, r=50, b=65, t=90),
         scene={"aspectratio": {"x": aspect_x, "y": aspect_y, "z": aspect_z}},
+    )
+    return fig
+
+
+def create_3d_surface_multi(heightmaps, titles=None):
+    """
+    Plot multiple 3D heightmaps side by side in a single browser tab.
+
+    Args:
+        heightmaps: list of 2D arrays
+        titles: optional list of titles per subplot
+    """
+    num = len(heightmaps)
+    titles = titles or [f"Plot {i+1}" for i in range(num)]
+
+    fig = make_subplots(
+        rows=1,
+        cols=num,
+        specs=[[{"type": "surface"}] * num],
+        subplot_titles=titles,
+    )
+
+    for i, heightmap in enumerate(heightmaps):
+        y_len, x_len = heightmap.shape
+        scale = max(y_len, x_len)
+        aspect_x = x_len / scale
+        aspect_y = y_len / scale
+        aspect_z = 0.2 * max(aspect_x, aspect_y)
+
+        surface = go.Surface(z=heightmap, colorscale="earth", showscale=False)
+        fig.add_trace(surface, row=1, col=i + 1)
+        fig.update_scenes(
+            dict(
+                aspectratio={"x": aspect_x, "y": aspect_y, "z": aspect_z},
+            ),
+            row=1,
+            col=i + 1,
+        )
+
+    fig.update_layout(
+        title_text="Heightmap Comparison",
+        margin=dict(l=0, r=0, b=0, t=40),
     )
     return fig
 
@@ -128,6 +173,7 @@ def setup_interactive_plots(metadata, ift_result, reference_chirp, crop_region):
 
     return (fig, ax), (fig_sequence, ax_sequence)
 
+
 def plot_lines(corr_list, labels=None, prev_shift=None, new_shift=None):
     """
     Plot multiple cross-correlation spectra on the same plot.
@@ -141,23 +187,23 @@ def plot_lines(corr_list, labels=None, prev_shift=None, new_shift=None):
     x = np.arange(N)
 
     plt.figure(figsize=(10, 4))
-    
+
     for idx, corr in enumerate(corr_list):
         label = labels[idx] if labels is not None else f"corr {idx}"
         jitter = np.random.normal(scale=0.03, size=1)
-        
-        plt.plot(x, normalize_max_abs(corr)+jitter, label=label)
+
+        plt.plot(x, normalize_max_abs(corr) + jitter, label=label)
 
     if prev_shift is not None:
-        plt.axvline(prev_shift, color='r', linestyle='--', label='Prev shift')
+        plt.axvline(prev_shift, color="r", linestyle="--", label="Prev shift")
     if prev_shift is not None:
-        plt.axvline(new_shift, color='b', linestyle='--', label='New shift')
-    
+        plt.axvline(new_shift, color="b", linestyle="--", label="New shift")
+
     plt.xlabel("Lag")
     plt.ylabel("Correlation")
     plt.title("Cross-correlation spectra")
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig("/tmp/plot.png")
+    plt.savefig("plot.png")
     # plt.show()

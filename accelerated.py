@@ -52,10 +52,10 @@ async def main():
         "--chunk-size", type=int, default=64, help="Chunk size for processing"
     )
     parser.add_argument(
-        "--peak-method", 
-        choices=["quadratic", "wavelet"], 
+        "--peak-method",
+        choices=["quadratic", "wavelet"],
         default="quadratic",
-        help="Method for subpixel peak detection"
+        help="Method for subpixel peak detection",
     )
     args = parser.parse_args()
 
@@ -105,7 +105,7 @@ async def main():
         crop_region[2] + crop_region[3]
     ) // 2
 
-    chirp_window = 50  # see TODO, not currently centered :O
+    chirp_window = 10  # see TODO, not currently centered :O
     video_array_chirp = load_video(
         args.video_file,
         (x, x + chirp_window, y, y + chirp_window),
@@ -137,33 +137,9 @@ async def main():
         peak_method=args.peak_method,
     )
 
-    # Reassemble results
-    max_indices = np.zeros((shape[0], shape[1]))
-    if args.plot2d:
-        ift_result = np.zeros((shape[0], shape[1], shape[2], shape[3]))
-
-    while True:
-        chunk = await result_queue.get()
-        if chunk is None:
-            break
-
-        max_indices[
-            chunk["y_start"] : chunk["y_end"], chunk["x_start"] : chunk["x_end"]
-        ] = chunk["result_left"]
-
-        if args.plot2d:
-            ift_result[
-                chunk["y_start"] : chunk["y_end"],
-                chunk["x_start"] : chunk["x_end"],
-                :,
-                :,
-            ] = chunk["result_right"]
-
-        result_queue.task_done()
-
     # Initialize frequencies variable
     frequencies = None
-    
+
     # Reassemble results
     max_indices = np.zeros((shape[0], shape[1]))
     if args.plot2d:
@@ -179,7 +155,11 @@ async def main():
         ] = chunk["result_left"]
 
         # Capture frequencies if using wavelet method
-        if args.peak_method == "wavelet" and "frequencies" in chunk and chunk["frequencies"] is not None:
+        if (
+            args.peak_method == "wavelet"
+            and "frequencies" in chunk
+            and chunk["frequencies"] is not None
+        ):
             frequencies = chunk["frequencies"]
 
         if args.plot2d:
@@ -202,10 +182,13 @@ async def main():
     # Save results
     np.save("array.npy", max_indices)
     normalize_and_save(max_indices, "out.png")
-    
+
     # Save frequency information if using wavelet method
     if args.peak_method == "wavelet" and frequencies is not None:
-        np.save("estimated_frequencies.npy", frequencies.cpu().numpy() if hasattr(frequencies, 'cpu') else frequencies)
+        np.save(
+            "estimated_frequencies.npy",
+            frequencies.cpu().numpy() if hasattr(frequencies, "cpu") else frequencies,
+        )
 
     # Report timing
     end_time = time.perf_counter()
