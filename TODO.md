@@ -29,3 +29,10 @@ switch to inserting directly into preallocated result array with a mutex
 ## Use full colour
 - currently converting to greyscale but colour has more information.
 - trivial mechanical change: carry through three colour channels, perform three independent cross-correlations, vote for best fit (i.e. we take the max of the cross-correlation as position in the 1 channel case, probably take something like the max of the product of the three in the RGB case).
+
+
+# new todo
+show both components of the estimation: coherence, phase refinement and the combined form
+return to interactive matplotlib for investigation
+get wave count bias from larger set for noise robustness?
+port CPU code to opencl, see if it runs on macos
