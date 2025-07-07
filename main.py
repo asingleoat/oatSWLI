@@ -10,6 +10,7 @@ import numpy as np
 from primitives import (
     align_multi,
     align_multi_p,
+    align_single,
     normalize,
 )
 
@@ -26,10 +27,12 @@ from visualization import (
     create_3d_surface_plot,
     setup_interactive_plots,
     create_3d_surface_multi,
+    plot_interactive,
 )
 
 from smooth import (
-    nearest_smooth,
+    nearest_thirteen_smooth,
+    nearest_five_smooth,
 )
 
 try:
@@ -49,16 +52,19 @@ def main():
     parser.add_argument(
         "--plot3d", action="store_true", help="Show interactive 3D plots"
     )
+    parser.add_argument(
+        "--plot2d", action="store_true", help="Show interactive 2D plots"
+    )
 
     args = parser.parse_args()
     video = load_video_frames(args.video_file, gray=True)
 
     print(video.shape)
-    video = video[:, :, :, : (nearest_smooth(video.shape[-1]))]
+    video = video[:, :, :, : (nearest_five_smooth(video.shape[-1]))]
     print(video.shape)
 
-    max_indices, phases, coherence = align_multi_p(
-        video[0, 000, 0, :], video[:, :, 0, :], max_dev=50, band=(0, 1)
+    max_indices, phases, coherence, correlations = align_single(
+        video[0, 0, 0, :], video[:, :, 0, :], max_dev=50, band=(0, 1)
     )
     # max_indices = remove_tilt_grayscale(max_indices)
 
@@ -70,6 +76,12 @@ def main():
         # fig.show()
         fig.write_html("plot.html", auto_open=False)
 
+
+    if args.plot2d:
+        print("Will render 2d")
+        plot_interactive(video[:,:,:,0], video[0,0,0,:], correlations, max_indices)
+
+        
     end_time = time.perf_counter()
     print(f"Execution time: {end_time - start_time:.6f} seconds")
     exit()
@@ -109,7 +121,6 @@ def load_video_frames(path, resize=None, limit=None, gray=False):
         (total_frames, height, width, num_channels)
     )
     arr = np.transpose(arr, (2, 1, 3, 0))  # [T, H, W, C] → [W, H, C, T]
-    # arr = arr[:, ::-1, :, :]
     return arr.astype(np.float32)  # TODO: do I need this cast?
 
 

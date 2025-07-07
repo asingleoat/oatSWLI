@@ -78,6 +78,11 @@ def create_3d_surface_multi(heightmaps, titles=None):
     return fig
 
 
+def subtract_mean(arr):
+    mean = np.mean(arr)
+    return arr - mean
+
+
 def normalize_max_abs(arr):
     max_abs = np.max(np.abs(arr))
     return arr / max_abs if max_abs != 0 else arr
@@ -174,6 +179,68 @@ def setup_interactive_plots(metadata, ift_result, reference_chirp, crop_region):
     return (fig, ax), (fig_sequence, ax_sequence)
 
 
+def plot_interactive(frame, reference_chirp, ifts, offsets):
+    fig, ax = plt.subplots()
+    img_display = ax.imshow(frame) # , cmap="plasma")
+    ax.set_title(f"Video Frame")
+    plt.colorbar(img_display)
+    vlines = []  # store references to axvlines
+
+    # Create a second figure for plotting the intensity over time
+    fig_sequence, ax_sequence = plt.subplots()
+    ax_sequence.set_title("Pixel Intensity")
+    ax_sequence.set_xlabel("Frame Number")
+    ax_sequence.set_ylabel("Intensity")
+
+    (reference_plot,) = ax_sequence.plot(
+        np.arange(reference_chirp.shape[0]),
+        normalize_max_abs(subtract_mean(reference_chirp)),
+        label="Reference Curve",
+        linestyle="dashed",
+        color="black",
+    )
+
+
+    (sequence_plot,) = ax_sequence.plot([], [], label="Selected Pixel", color="red")
+    # (sequence_plot_p,) = ax_sequence.plot([], [], label="Product", color="orange")
+    # sequence_plot_p.set_xdata(np.arange(sequence.shape[1]))
+
+    # Define click handler
+    def on_click(event):
+        # Remove old vlines
+        for line in vlines:
+            line.remove()
+            vlines.clear()
+        # ignore clicks outside the image
+        if event.xdata is None or event.ydata is None:
+            return
+
+        x, y = int(event.ydata), int(event.xdata)
+
+        vlines.append(ax_sequence.axvline(offsets[x,y], color="black", linestyle="--", label="offset"))
+
+        sequence = ifts[x, y, ::-1]
+        # Update plots
+        sequence_plot.set_xdata(np.arange(sequence.shape[-1]))        
+        sequence_plot.set_ydata(normalize_max_abs(sequence))
+        # sequence_plot_p.set_ydata(
+        #     normalize_max_abs(clip_negative(sequence[0]))
+        #     * normalize_max_abs(clip_negative(sequence[-1]))
+        # )
+        # sequence_plot_cube.set_xdata(np.arange(sequence.shape[1]))
+        # sequence_plot_cube.set_ydata(2 * normalize_max_abs(cubed_0 + cubed_1 + cubed_2))
+
+        ax_sequence.relim()
+        ax_sequence.autoscale_view()
+
+        fig_sequence.canvas.draw()
+
+    # Connect click event listener
+    fig.canvas.mpl_connect("button_press_event", on_click)
+    plt.legend()
+    plt.show()
+
+    
 def plot_lines(corr_list, labels=None, prev_shift=None, new_shift=None):
     """
     Plot multiple cross-correlation spectra on the same plot.
@@ -206,4 +273,3 @@ def plot_lines(corr_list, labels=None, prev_shift=None, new_shift=None):
     plt.grid(True)
     plt.tight_layout()
     plt.savefig("plot.png")
-    # plt.show()

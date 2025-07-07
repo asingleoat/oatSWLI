@@ -9,16 +9,28 @@ from concurrent.futures import ProcessPoolExecutor
 import os
 from visualization import create_3d_surface_plot, setup_interactive_plots, plot_lines
 
+try:
+    profile
+except NameError:
+
+    def profile(func):
+        return func
+
+
 sigma = 10
 bias = 2.0
 a = 1
-
 
 def normalize(x):
     max_abs = np.max(np.abs(x))
     if max_abs == 0:
         return x  # avoid divide-by-zero
     return x / max_abs
+
+
+def subtract_mean(arr):
+    mean = np.mean(arr)
+    return arr - mean
 
 
 def unwrap_shift(i, N):
@@ -40,12 +52,11 @@ def average_if_defined(x, y):
 
 
 def align_multi(b_host, a_host, max_dev=1.0):
-    # Pre-compute reference FFT (conjugated for cross-correlation)
     reference = np.conj(np.fft.rfft(b_host.astype(np.float32), axis=-1))
     N = a_host.shape[-1]  # Length of sequences
 
     num_cores = os.cpu_count()
-    print("Num cores: ", num_cores)
+
     # Create chunks for 2D processing (flatten first two dimensions)
     original_shape = a_host.shape[:2]  # Store original 2D shape
     a_flat = a_host.reshape(
@@ -127,6 +138,7 @@ def align_multi_p(b_host, a_host, max_dev=1.0, band=(0.05, 0.4), tile_size=(100,
     reference = np.conj(np.fft.rfft(b_host.astype(np.float32), axis=-1))
     N = a_host.shape[-1]
     H, W = a_host.shape[:2]
+
     num_cores = os.cpu_count()
 
     tile_H, tile_W = tile_size
@@ -134,7 +146,9 @@ def align_multi_p(b_host, a_host, max_dev=1.0, band=(0.05, 0.4), tile_size=(100,
     num_tiles_w = (W + tile_W - 1) // tile_W
 
     offsets = np.empty((H, W), dtype=np.float32)
+
     phase_offsets = np.empty((H, W), dtype=np.float32)
+
     coherence_offsets = np.empty((H, W), dtype=np.float32)
 
     global_fallback_count = 0
@@ -205,13 +219,100 @@ def align_multi_p(b_host, a_host, max_dev=1.0, band=(0.05, 0.4), tile_size=(100,
     print("Fallback proportion:", global_fallback_count / (H * W))
     return (-offsets, -phase_offsets, -coherence_offsets)
 
+@profile
+def align_single(b_host, a_host, max_dev=1.0, band=(0.05, 0.4), tile_size=(1000, 1000)):
+    reference = np.conj(np.fft.rfft(b_host.astype(np.float32), axis=-1))
+    N = a_host.shape[-1]
+    H, W = a_host.shape[:2]
 
+
+    tile_H, tile_W = tile_size
+    num_tiles_h = (H + tile_H - 1) // tile_H
+    num_tiles_w = (W + tile_W - 1) // tile_W
+
+    offsets = np.empty((H, W), dtype=np.float32)
+
+    phase_offsets = np.empty((H, W), dtype=np.float32)
+
+    coherence_offsets = np.empty((H, W), dtype=np.float32)
+
+    correlations = np.empty((H, W, N), dtype=np.float32)
+
+    global_fallback_count = 0
+    total_tweaks = 0
+    counter = 0
+
+    # Tile processing in diagonals: stage = i + j
+    for stage in range(num_tiles_h + num_tiles_w - 1):
+        results = []
+        for i in range(num_tiles_h):
+            j = stage - i
+            if j < 0 or j >= num_tiles_w:
+                continue
+
+            row_start = i * tile_H
+            col_start = j * tile_W
+            row_end = min((i + 1) * tile_H, H)
+            col_end = min((j + 1) * tile_W, W)
+
+            tile_data = a_host[row_start:row_end, col_start:col_end, :]
+
+            left_bias = None
+            if j > 0:
+                left_bias = offsets[row_start:row_end, col_start - 1]
+            bottom_bias = None
+            if i > 0:
+                bottom_bias = offsets[
+                    row_start - 1, col_start : col_start + col_end
+                ]
+
+            results.append(
+                        process_chunk(
+                        tile_data,
+                        reference,
+                        N,
+                        max_dev,
+                        band,
+                        (row_start, col_start),
+                        left_bias,
+                        bottom_bias,
+                    )
+                )
+
+        for result in results:
+            (
+                (i0, j0),
+                tile_offsets,
+                fallback_count,
+                avg_tweak,
+                max_tweak,
+                tile_phase,
+                tile_coherence,
+                tile_correlations,
+            ) = result
+            h, w = tile_offsets.shape
+            offsets[i0 : i0 + h, j0 : j0 + w] = tile_offsets
+            phase_offsets[i0 : i0 + h, j0 : j0 + w] = tile_phase
+            coherence_offsets[i0 : i0 + h, j0 : j0 + w] = tile_coherence
+            correlations[i0 : i0 + h, j0 : j0 + w] = tile_correlations
+            global_fallback_count += fallback_count
+            total_tweaks += avg_tweak
+            counter += 1
+
+    print("Avg Phase Refinement:", total_tweaks / counter)
+    print("Max Phase Refinement:", max_tweak)
+    print("Fallbacks:", global_fallback_count)
+    print("Fallback proportion:", global_fallback_count / (H * W))
+    return (-offsets, -phase_offsets, -coherence_offsets, correlations)
+
+@profile
 def process_chunk(
     tile_data, reference, N, max_dev, band, tile_origin, left_bias, bottom_bias
 ):
     H, W, _ = tile_data.shape
     local_offsets = np.empty((H, W), dtype=np.float32)
     phase_offsets = np.empty((H, W), dtype=np.float32)  # debug only
+    correlations =  np.empty((H,W,N), dtype=np.float32)  # debug only
     coherence_offsets = np.empty((H, W), dtype=np.float32)  # debug only
     fallback_count = 0
     tweaks = 0
@@ -249,13 +350,10 @@ def process_chunk(
             cross_spec_band[0] *= 8 / N
 
             corr = np.fft.irfft(cross_spec_band, n=N)
-            corr *= -1
-            if prev_shift is None:
-                peak = np.argmax(corr)
-            else:
-                peak = argmax_with_prior(corr, prev_shift, sigma=sigma)
+            # corr *= -1
+            peak = argmax_with_prior(corr, prev_shift, sigma=sigma)
             shift_int = unwrap_shift(peak, N)
-            corr *= -1
+            # corr *= -1
 
             valid = freqs > 0
             f = freqs[valid]
@@ -270,6 +368,7 @@ def process_chunk(
             mag /= mag.max() + 1e-12
             mask = np.abs(delta) <= max_dev
 
+            correlations[i,j] = corr
             if np.sum(mask) < 3:
                 local_offsets[i, j] = float(shift_int)
                 phase_offsets[i, j] = 0
@@ -284,15 +383,15 @@ def process_chunk(
                 max_tweak = max(max_tweak, np.abs(delta_refined))
                 pixels += 1
 
-            if (th + i, tw + j) == (71, 83) or (th + i, tw + j) == (70, 83):
-                print(cross_spec_band[0])
-                print(cross_spec_band[100])
-                new_shift, prior, score = argmax_with_prior_debug(
-                    corr, prev_shift, sigma=sigma
-                )
-                print((th + i, tw + j), new_shift, shift_int, delta_refined)
-                lines += [corr, score, prior]
-                labels += ["corr", "score", "prior"]
+            # if (th + i, tw + j) == (71, 83) or (th + i, tw + j) == (70, 83):
+            #     print(cross_spec_band[0])
+            #     print(cross_spec_band[100])
+            #     new_shift, prior, score = argmax_with_prior_debug(
+            #         corr, prev_shift, sigma=sigma
+            #     )
+            #     print((th + i, tw + j), new_shift, shift_int, delta_refined)
+            #     lines += [corr, score, prior]
+            #     labels += ["corr", "score", "prior"]
     if lines:
         print(len(lines))
         plot_lines(lines, labels=labels, prev_shift=None, new_shift=None)
@@ -305,6 +404,7 @@ def process_chunk(
         max_tweak,
         phase_offsets,
         coherence_offsets,
+        correlations,
     )
 
 
@@ -325,16 +425,22 @@ def left_skewed_gaussian_manual(x, center, sigma, alpha=2.0):
 
 
 def argmax_with_prior(corr, prev_shift, sigma):
+    corr = subtract_mean(corr)
+    corr = np.diff(corr)
+    corr *= -1
+    corr = np.append(corr, corr[-1])
     N = len(corr)
-    indices = unwrap_around(np.arange(len(corr)), N, prev_shift)
 
-    prior = left_skewed_gaussian_manual(indices, prev_shift, sigma, alpha=a)
-    # prior = np.exp(-0.5 * ((indices - prev_shift) / sigma) ** 2)
-    prior /= prior.max()  # normalize
-    prior += bias  # non-zero chance of abrupt step in ground truth
-    prior /= prior.max()  # normalize
-
-    score = corr * prior
+    if prev_shift is not None:
+        indices = unwrap_around(np.arange(len(corr)), N, prev_shift)
+        prior = left_skewed_gaussian_manual(indices, prev_shift, sigma, alpha=a)
+        # prior = np.exp(-0.5 * ((indices - prev_shift) / sigma) ** 2)
+        prior /= prior.max()  # normalize
+        prior += bias  # non-zero chance of abrupt step in ground truth
+        prior /= prior.max()  # normalize
+        score = corr * prior
+    else:
+        score = corr
     idx = np.argmax(score)
 
     idx = unwrap_shift(idx, N)
@@ -516,10 +622,6 @@ def gaussian_cosine_batch(
             pulses[b, c, :] = add_noise(gauss * carrier, snr)
 
     return pulses
-
-
-# shifted = sinc_pulse(length=N, width=width, offset=shift_amt)
-# ref = sinc_pulse(length=N, width=width, offset=0)
 
 
 def run_shift_trials(ref, shifted, estimate_fn, snr_db, shift_amt, n_trials=100):
